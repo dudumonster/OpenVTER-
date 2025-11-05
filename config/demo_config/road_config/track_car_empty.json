@@ -1,0 +1,22 @@
+{
+  "version": "4.5.7",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "roi",
+      "points": [[0,0],[3840,0],[3840,2160],[0,2160]],
+      "shape_type": "polygon",
+      "flags": {}
+    },
+    {
+      "label": "length_10",
+      "points": [[100,100],[200,100]],
+      "shape_type": "line",
+      "flags": {}
+    }
+  ],
+  "imagePath": "",
+  "imageData": null,
+  "imageHeight": 2160,
+  "imageWidth": 3840
+}

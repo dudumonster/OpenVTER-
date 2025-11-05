@@ -1,0 +1,20 @@
+{
+  "detection": "centernet_bbavectors.json",
+  "tracking": "sort_r.json",
+  "video_folder": "data1/UAV_Videos/20220303_5_E_300/track",
+  "first_video_name": "track_middle_raw.mp4",
+  "video_num": 1,
+  "road_config": "config/demo_config/road_config/track_car_empty.json",
+  "save_folder": "data1/UAV_Videos/track_middle_raw/output",
+  "out_fps": 25,
+  "output_video": 1,
+  "inference_batch_size": 10,
+  "bbox_label": ["id","score","lane"],
+  "pipeline": ["stab","det"],
+  "stabilize_file": "track_middle_raw.pkl",
+  "split_gap": 100,
+  "subsize_height": 512,
+  "stabilize_scale": 0,
+  "video_start_frame": 0,
+  "video_end_frame": 0
+}

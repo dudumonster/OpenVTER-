@@ -1,0 +1,2 @@
+Video stabilization  视频稳定
+python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300.json

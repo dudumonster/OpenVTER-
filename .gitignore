@@ -120,6 +120,13 @@ venv.bak/
 # mkdocs documentation
 /site
 
+# Ignore model checkpoints
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.jit
+
 # mypy
 .mypy_cache/
 .dmypy.json

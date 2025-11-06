@@ -1,2 +1,10 @@
 Video stabilization  视频稳定
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300.json
+
+
+Vehicle detection and tracking
+车辆检测与跟踪
+python video_inference_main.py -s 3 -c config/demo_config/video_config/20220303_5_E_300.json
+
+python video_inference_main.py -s 3 -c config/demo_config/video_config/track_small_raw.json
+先完成视频稳定，生成映像，然后在完成检测和跟踪

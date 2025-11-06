@@ -67,7 +67,7 @@ class DroneVideoStab:
                 video_file_ls.append(os.path.join(video_folder, video_name))
             return video_file_ls
 
-    def process(self,step=1):`
+    def process(self,step=1):
         '''
 
         :param step: 1:output the stabilize pkl file 2:output stabilize video

@@ -1,5 +1,6 @@
 Video stabilization  视频稳定
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300.json
+python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/Reduced_video.json（通过这个指令我试了裁剪视频，减少我的实验时间-输出没问题；裁剪没问题；导出没问题）
 
 
 Vehicle detection and tracking
@@ -7,4 +8,16 @@ Vehicle detection and tracking
 python video_inference_main.py -s 3 -c config/demo_config/video_config/20220303_5_E_300.json
 
 python video_inference_main.py -s 3 -c config/demo_config/video_config/track_small_raw.json
+python video_inference_main.py -s 3 -c config/demo_config/video_config/touchv.json
 先完成视频稳定，生成映像，然后在完成检测和跟踪
+python video_inference_main.py -s 3 -c config/demo_config/video_config/Reduced_video.json
+
+
+
+output_result.py-----（将输出的pkl文件转化为csv/xlsx文件）
+git_test.py-----（测试git上传和同步）
+
+
+(DMS) C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER>python using/visualize_road_config.py --road-config config/demo_config/road_config/20220303_5_E_300_1.json --output out.jpg --background data1/UAV_Videos/cropped_1min\output/cropped_1min/background_cropped_1min.jpg
+Saved visualization to out.jpg
+（测试车道线标注----输出成功）

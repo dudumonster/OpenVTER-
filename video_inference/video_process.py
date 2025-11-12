@@ -63,7 +63,11 @@ class DroneVideoProcess:
         self.stabilize_scale = config_dict.get('stabilize_scale', 1)
         self.stabilize_smooth = config_dict.get('stabilize_smooth', 1)
         self.stabilize_translate = config_dict.get('stabilize_translate', 1)
+
+        #可视化相关
         self.output_background = config_dict.get('output_background', 1) # 输出背景图片
+        self.debug_lane_log = config_dict.get('debug_lane_log', False)
+        self.debug_lane_draw = config_dict.get('debug_lane_draw', False)
         self.background_image_ls = []
 
         self.bbox_label = config_dict.get('bbox_label',['id','score','xy'])
@@ -95,6 +99,12 @@ class DroneVideoProcess:
 
         self.det_bbox_result = {'video_info': [], 'output_info': {'output_fps': self.out_fps}, 'traj_info': [],
                                 'process_time': datetime.datetime.now(),'raw_det':[]}
+        # 存储检测结果
+        #video_info: 视频信息
+        #output_info: 输出信息
+        #traj_info: 轨迹信息
+        #process_time: 处理时间
+        #raw_det: 原始检测结果
 
     def _get_video_file(self,config_dict):
         if 'video_file' in config_dict:
@@ -310,16 +320,18 @@ class DroneVideoProcess:
                     continue
                 x, y = position
 
-                position_arr = np.array([x, y, 0, 0, 0, x, y, x, y, x, y, x, y,0, 0],dtype=np.float32)
-                position_arr_t = torch.from_numpy(position_arr).to(self.det_model.device)
-                new_nms = nms_results + position_arr_t
+                position_arr = np.array([x, y, 0, 0, 0, x, y, x, y, x, y, x, y,0, 0],dtype=np.float32)#字段偏移量
+                position_arr_t = torch.from_numpy(position_arr).to(self.det_model.device)# 将位置信息转换为tensor
+                new_nms = nms_results + position_arr_t# 将检测结果与位置信息相加，得到新的检测结果
                 new_nms_ls.append(new_nms)
         t3 = time.time()
         # 坐标轴
         if self.axis_image is not None:
-            frame = cv2.add(frame, self.axis_image)
+            frame = cv2.add(frame, self.axis_image)# 将坐标轴图像添加到帧中
         # 跟踪与可视化
         det_raw = np.empty((0, 15))
+        lane_centers = np.empty((0, 2))
+        lane_ids = []
         if len(new_nms_ls)==0:
             self.mot_tracker.update()
             nms_img = frame
@@ -330,6 +342,7 @@ class DroneVideoProcess:
                     o_bboxs_res = np.empty((0, 20))
             else:
                 o_bboxs_res = np.empty((0, 11))
+            lane_ids = []
         else:
             all_bbox = torch.vstack(new_nms_ls)
             dets, keep_inds = nms_rotated(all_bbox[:, :5], all_bbox[:, 5], 0.3)
@@ -340,8 +353,10 @@ class DroneVideoProcess:
                 det_raw = nms_all_bbox.data.cpu().numpy()
             o_bboxs_res = self.mot_tracker.update(nms_all_bbox,frame)
             o_bboxs_res = self._pixel_to_xy(o_bboxs_res)
-            o_bboxs_res = self._get_lane_id(o_bboxs_res)
+            o_bboxs_res, lane_centers, lane_ids = self._get_lane_id(o_bboxs_res, frame_index)
             nms_img = self.det_model.draw_oriented_bboxs(frame, o_bboxs_res,self.bbox_label)
+            if self.debug_lane_draw and len(lane_centers) > 0:
+                self._draw_lane_debug(nms_img, lane_centers, lane_ids)
 
         t4 = time.time()
         if self.output_img:
@@ -356,7 +371,7 @@ class DroneVideoProcess:
 
         # 结果存储
         if len(srt_info_ls) == 0:
-            self.det_bbox_result['traj_info'].append((frame_index,output_frame,o_bboxs_res))
+            self.det_bbox_result['traj_info'].append((frame_index,output_frame,o_bboxs_res))#
             self.det_bbox_result['raw_det'].append((frame_index,output_frame,det_raw))
         else:
             if frame_index >= len(srt_info_ls):
@@ -421,23 +436,34 @@ class DroneVideoProcess:
         else:
             return nms_result
 
-    def _get_lane_id(self,nms_result):
+    def _get_lane_id(self,nms_result, frame_index=None):
         lanes = self.road_config['lane']
-        if len(lanes) == 0:
-            return nms_result
-        else:
-            lane_name_ls = []
-            for object_index in range(nms_result.shape[0]):
-                pred = nms_result[object_index]
-                pixel_ct = np.mean(pred[:8].reshape(-1,2),axis=0)
-                lane_name = -1
-                for key, lane_polygon in lanes.items():
-                    if isPointinPolygon(pixel_ct,lane_polygon):
-                        lane_name = key
-                        break
-                lane_name_ls.append(lane_name)
-            return np.hstack((nms_result,np.array(lane_name_ls).reshape(-1,1)))
+        if len(lanes) == 0 or nms_result.shape[0] == 0:
+            return nms_result, np.empty((0, 2)), []
+        pixel_cts = nms_result[:,:8].reshape(-1,4,2).mean(axis=1)
+        lane_name_ls = []
+        for pixel_ct in pixel_cts:
+            lane_name = -1
+            for key, lane_polygon in lanes.items():
+                if isPointinPolygon(pixel_ct,lane_polygon):
+                    lane_name = key
+                    break
+            lane_name_ls.append(lane_name)
+        if self.debug_lane_log and frame_index is not None:
+            track_ids = nms_result[:,10] if nms_result.shape[1] > 10 else np.arange(nms_result.shape[0])
+            for tid, center, lane_name in zip(track_ids, pixel_cts, lane_name_ls):
+                print(f"[lane_debug] frame={frame_index} track={int(tid)} center=({center[0]:.1f},{center[1]:.1f}) lane={lane_name}")
+        lane_array = np.array(lane_name_ls).reshape(-1,1)
+        return np.hstack((nms_result,lane_array)), pixel_cts, lane_name_ls
 
+    def _draw_lane_debug(self, image, centers, lane_ids):
+        for center, lane in zip(centers, lane_ids):
+            pt = (int(center[0]), int(center[1]))
+            color = (0, 255, 255) if lane != -1 else (0, 0, 255)
+            cv2.circle(image, pt, 6, color, 2, cv2.LINE_AA)
+            cv2.putText(image, f"L{lane}", (pt[0]+4, pt[1]-4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+    #
 
 if __name__ == '__main__':
 

@@ -21,3 +21,30 @@ git_test.py-----（测试git上传和同步）
 (DMS) C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER>python using/visualize_road_config.py --road-config config/demo_config/road_config/20220303_5_E_300_1.json --output out.jpg --background data1/UAV_Videos/cropped_1min\output/cropped_1min/background_cropped_1min.jpg
 Saved visualization to out.jpg
 （测试车道线标注----输出成功）
+
+python using/inspect_det_bbox.py --pkl data1\UAV_Videos\cropped_1min\output\cropped_1min\det_bbox_result_cropped_1min.pkl --tracks 1 150 --frames 1 200 
+python using/inspect_det_bbox.py --pkl data1\UAV_Videos\cropped_1min\output\cropped_1min\det_bbox_result_cropped_1min.pkl --frames 1 5
+Loaded keys: ['video_info', 'output_info', 'traj_info', 'process_time', 'raw_det']
+Total traj entries (frames): 1500
+traj_info结构：
+Entry type: <class 'tuple'>, length: 3
+  element[0] type: <class 'int'>, value shape/len: 0
+  element[1] type: <class 'int'>, value shape/len: 0
+  element[2] type: <class 'numpy.ndarray'>, value shape/len: (95, 20)
+
+这 20 列对应的字段顺序为：
+1-8. 像素四点坐标 x1_px, y1_px, …, x4_px, y4_px
+9. score（检测置信度）
+10. category（检测类别）
+11. track_id（跟踪 ID）
+12-19. 世界坐标四点 x1_world … y4_world（说明 road_config 提供了像素→世界坐标矩阵）
+20. lane_id（车道编号，因为 road_config 里定义了 lane_* 多边形）
+
+因此 traj_info 实际存的是“每帧的所有轨迹数组”。如果你遍历 traj_info，对 element[2] 的每一行按上述列名解读，就能得到每辆车在该帧的全部信息，然后再按 track_id 拼起来，就可以导出高D式的轨迹表了。
+（测试）
+
+
+
+python using/output_result.py --pkl data1/UAV_Videos/cropped_1min/output/cropped_1min/det_bbox_result_cropped_1min.pkl
+解析输出的pkl格式
+

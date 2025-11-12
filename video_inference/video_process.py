@@ -378,8 +378,8 @@ class DroneVideoProcess:
                 frame_time = srt_info_ls[-1][0]
             else:
                 frame_time = srt_info_ls[frame_index][0]
-            self.det_bbox_result['traj_info'].append((frame_index,output_frame, o_bboxs_res,frame_time))
-            self.det_bbox_result['raw_det'].append((frame_index, output_frame, det_raw,frame_time))
+            self.det_bbox_result['traj_info'].append((frame_index,output_frame, o_bboxs_res,frame_time))#轨迹信息
+            self.det_bbox_result['raw_det'].append((frame_index, output_frame, det_raw,frame_time))#原始检测结果
         t5 = time.time()
 
     def _save_det_bbox(self,save_file_folder):

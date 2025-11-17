@@ -68,6 +68,38 @@ def add_track_lifetime(df):
     return df
 
 
+def add_heading_velocity(df, fps):
+    if not all(col in df.columns for col in WORLD_COORD_NAMES):
+        # 没有世界坐标就跳过
+        return df
+    dt = 1.0 / fps if fps and fps > 0 else 1.0
+
+    # 航向角：用世界坐标的上边边向量 (x1->x2) 作为朝向，单位度
+    dx = df["x2_world"] - df["x1_world"]
+    dy = df["y2_world"] - df["y1_world"]
+    heading_rad = np.arctan2(dy, dx)
+    df["heading"] = np.degrees(heading_rad)
+
+    # 中心点
+    df["xCenter_world"] = (df["x1_world"] + df["x3_world"]) / 2
+    df["yCenter_world"] = (df["y1_world"] + df["y3_world"]) / 2
+
+    # 全局速度/加速度
+    df["xVelocity"] = df.groupby("track_id")["xCenter_world"].diff() / dt
+    df["yVelocity"] = df.groupby("track_id")["yCenter_world"].diff() / dt
+    df["xAcceleration"] = df.groupby("track_id")["xVelocity"].diff() / dt
+    df["yAcceleration"] = df.groupby("track_id")["yVelocity"].diff() / dt
+
+    # 纵/横向速度：将全局速度旋转到车辆朝向系，前向为 +lon，右侧为 +lat
+    cos_h = np.cos(heading_rad)
+    sin_h = np.sin(heading_rad)
+    df["lonVelocity"] = df["xVelocity"] * cos_h + df["yVelocity"] * sin_h
+    df["latVelocity"] = -df["xVelocity"] * sin_h + df["yVelocity"] * cos_h
+    df["lonAcceleration"] = df["xAcceleration"] * cos_h + df["yAcceleration"] * sin_h
+    df["latAcceleration"] = -df["xAcceleration"] * sin_h + df["yAcceleration"] * cos_h
+    return df
+
+
 def main():
     args = parse_args()
     pkl_path = Path(args.pkl)
@@ -75,6 +107,7 @@ def main():
         data = pickle.load(f)
 
     traj_info = data["traj_info"]
+    fps = data.get("output_info", {}).get("output_fps", None)
     if not traj_info:
         raise RuntimeError("traj_info is empty.")
 
@@ -108,6 +141,7 @@ def main():
     df = pd.DataFrame(records)
     df = compute_centers(df)
     df = add_track_lifetime(df)
+    df = add_heading_velocity(df, fps)
 
     csv_path = output_dir / f"{base_name}.csv"
     xlsx_path = output_dir / f"{base_name}.xlsx"

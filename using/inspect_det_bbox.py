@@ -44,6 +44,11 @@ def main():
     traj = data["traj_info"]
     print(f"Total traj entries (frames): {len(traj)}")
 
+    # >>>>>>>>>>>>>> 你要添加的内容 <<<<<<<<<<<<<<
+    print("\n=== Sample raw traj_info entry ===")
+    print(traj[0])# 打印第一个轨迹信息-
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
     selected_frames = []
     for entry in traj:
         frame_idx, output_idx, arr, frame_time = format_entry(entry)
@@ -78,4 +83,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

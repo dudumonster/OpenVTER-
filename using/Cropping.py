@@ -1,9 +1,9 @@
 import cv2
 
 # 输入视频路径
-input_video_path = 'data1/UAV_Videos/20220303_5_E_300/20220303_5_E_300_1.MP4'
+input_video_path = 'data1/UAV_Videos/simpleround_road_config/output/simpleround_road/tracking_output_stab_det_simpleround_road.mp4'
 # 输出视频路径
-output_video_path = 'data1/UAV_Videos/20220303_5_E_300/cropped_1min.mp4'
+output_video_path = 'data1/UAV_Videos/simpleround_road_config/output/simpleround_road/test.mp4'
 
 # 打开视频文件
 cap = cv2.VideoCapture(input_video_path)

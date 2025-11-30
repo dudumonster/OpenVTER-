@@ -1,0 +1,23 @@
+{
+  "detection": "centernet_bbavectors.json",
+  "tracking": "sort_r.json",
+  "video_folder": "data1/UAV_Videos/20220303_5_E_300/track",
+  "first_video_name": "simpleround_road.mp4",
+  "video_num": 1,
+  "road_config": "config/demo_config/road_config/background_simple_road.json",
+  "save_folder": "data1/UAV_Videos/simpleround_road_config/output",
+  "out_fps": 25,
+  "output_video": 1,
+  "inference_batch_size": 10,
+  "bbox_label": ["id","score","lane"],
+  "pipeline": ["stab","det"],
+  "stabilize_file": "simpleround_road_config.pkl",
+  "split_gap": 100,
+  "subsize_height": 512,
+  "stabilize_scale": 0,
+  "video_start_frame": 0,
+  "video_end_frame": 0,
+  "debug_lane_log": true,
+  "debug_lane_draw": true
+
+}

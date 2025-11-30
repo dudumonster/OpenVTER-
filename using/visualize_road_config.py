@@ -67,13 +67,17 @@ def visualize(road_config_path: Path, output_path: Path, background_path: Path =
     if canvas is None:
         canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
+    # Colors and styles; make fp extra visible with thick border + alpha fill
     shape_colors = {
         "lane": (255, 0, 0),      # blue
-        "fp": (255, 255, 0),      # cyan filled
+        "fp": (0, 255, 255),      # bright yellow/cyan
         "road": (0, 255, 0),      # green
         "roi": (255, 255, 255),   # white
         "default": (0, 255, 255)  # yellow
     }
+    fp_alpha = 0.5
+    fp_border_color = (0, 0, 255)  # red border
+    fp_border_thickness = 3
 
     for shape in cfg.get("shapes", []):
         label = shape.get("label", "")
@@ -86,7 +90,12 @@ def visualize(road_config_path: Path, output_path: Path, background_path: Path =
             draw_label(canvas, label, pts, color)
         elif label == "fp":
             color = shape_colors["fp"]
-            cv2.fillPoly(canvas, [pts], color)
+            overlay = canvas.copy()
+            cv2.fillPoly(overlay, [pts], color)
+            # Alpha blend to create semi-transparent fill
+            cv2.addWeighted(overlay, fp_alpha, canvas, 1 - fp_alpha, 0, canvas)
+            # Thick border for fp
+            cv2.polylines(canvas, [pts], True, fp_border_color, fp_border_thickness, cv2.LINE_AA)
             draw_label(canvas, label, pts, (0, 0, 0))
         elif label == "road":
             color = shape_colors["road"]

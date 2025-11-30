@@ -74,12 +74,6 @@ def add_heading_velocity(df, fps):
         return df
     dt = 1.0 / fps if fps and fps > 0 else 1.0
 
-    # 航向角：用世界坐标的上边边向量 (x1->x2) 作为朝向，单位度
-    dx = df["x2_world"] - df["x1_world"]
-    dy = df["y2_world"] - df["y1_world"]
-    heading_rad = np.arctan2(dy, dx)
-    df["heading"] = np.degrees(heading_rad)
-
     # 中心点
     df["xCenter_world"] = (df["x1_world"] + df["x3_world"]) / 2
     df["yCenter_world"] = (df["y1_world"] + df["y3_world"]) / 2
@@ -89,6 +83,10 @@ def add_heading_velocity(df, fps):
     df["yVelocity"] = df.groupby("track_id")["yCenter_world"].diff() / dt
     df["xAcceleration"] = df.groupby("track_id")["xVelocity"].diff() / dt
     df["yAcceleration"] = df.groupby("track_id")["yVelocity"].diff() / dt
+
+    # 航向角：仅用速度方向计算
+    heading_rad = np.arctan2(df["yVelocity"], df["xVelocity"])
+    df["heading"] = np.degrees(heading_rad)
 
     # 纵/横向速度：将全局速度旋转到车辆朝向系，前向为 +lon，右侧为 +lat
     cos_h = np.cos(heading_rad)

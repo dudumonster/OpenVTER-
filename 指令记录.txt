@@ -1,7 +1,10 @@
+请你现在还是分析我的C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER这个项目，首先请你分析一下他的这个一个pipeline以及他的项目结构
+
+
 Video stabilization  视频稳定
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300.json
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/Reduced_video.json（通过这个指令我试了裁剪视频，减少我的实验时间-输出没问题；裁剪没问题；导出没问题）
-
+python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/simple_road_config.json
 
 Vehicle detection and tracking
 车辆检测与跟踪
@@ -11,6 +14,8 @@ python video_inference_main.py -s 3 -c config/demo_config/video_config/track_sma
 python video_inference_main.py -s 3 -c config/demo_config/video_config/touchv.json
 先完成视频稳定，生成映像，然后在完成检测和跟踪
 python video_inference_main.py -s 3 -c config/demo_config/video_config/Reduced_video.json
+python video_inference_main.py -s 3 -c config/demo_config/video_config/simple_road_config.json
+
 
 
 
@@ -24,6 +29,11 @@ Saved visualization to out.jpg
 
 python using/inspect_det_bbox.py --pkl data1\UAV_Videos\cropped_1min\output\cropped_1min\det_bbox_result_cropped_1min.pkl --tracks 1 150 --frames 1 200 
 python using/inspect_det_bbox.py --pkl data1\UAV_Videos\cropped_1min\output\cropped_1min\det_bbox_result_cropped_1min.pkl --frames 1 5
+（上述的那个指令可以
+python using/inspect_det_bbox.py --pkl <路径> --tracks <track起止ID> --frames <起始帧 结束帧>
+）
+
+
 Loaded keys: ['video_info', 'output_info', 'traj_info', 'process_time', 'raw_det']
 Total traj entries (frames): 1500
 traj_info结构：
@@ -41,10 +51,41 @@ Entry type: <class 'tuple'>, length: 3
 20. lane_id（车道编号，因为 road_config 里定义了 lane_* 多边形）
 
 因此 traj_info 实际存的是“每帧的所有轨迹数组”。如果你遍历 traj_info，对 element[2] 的每一行按上述列名解读，就能得到每辆车在该帧的全部信息，然后再按 track_id 拼起来，就可以导出高D式的轨迹表了。
-（测试）
+（测试）-------------->确认无误！！！
 
 
 
 python using/output_result.py --pkl data1/UAV_Videos/cropped_1min/output/cropped_1min/det_bbox_result_cropped_1min.pkl
-解析输出的pkl格式
+解析输出的pkl格式-------->xlsx
+# 导出到同目录 saving/ 下的 csv/xlsx
+
+
+
+
+
+
+
+
+
+
+
+🎞 基础信息	recording_id	文件名/视频名（此处为 det_bbox_result_cropped_1min）
+	frame_index	当前帧编号（从 0 开始）
+	output_frame	输出帧编号（与 frame_index 一致）
+	frame_time	帧时间（此处为空 NaN，说明视频中未记录时间戳）
+⚙ 检测框坐标（像素系）	x1_px ~ y4_px	检测框的 4 个顶点像素坐标（单位：px）
+📈 检测置信度与类别	score	模型检测置信度（0~1）
+	category	目标类别（此处全为 0，说明只检测了一类目标，如“车辆”）
+🚗 跟踪信息	track_id	跟踪目标编号（同一目标跨帧保持一致）
+	track_lifetime	目标已出现的帧数（生命周期计数）
+🌍 世界坐标系（投影坐标）	x1_world ~ y4_world	检测框四个角在世界坐标中的位置（经过透视转换）
+	xCenter_world, yCenter_world	目标中心点的世界坐标位置
+🛣 车道信息	lane_id	车辆所在车道编号（1~8）
+📍 中心点坐标（像素系）	xCenter_px, yCenter_px	检测框中心像素坐标（由四点均值计算）
+
+python using/visualize_road_config.py --road-config config/demo_config/road_config/20220303_5_E_300_1.json --output out_fp_preview.jpg --background "C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER\data1\UAV_Videos\cropped_1min\output\cropped_1min\background_cropped_1min.jpg" 
+
+
+数据标注：暂停->continue
+labelme "C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER\config\demo_config\road_config\background_simple_road.json"
 

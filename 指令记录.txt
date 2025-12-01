@@ -58,7 +58,7 @@ Entry type: <class 'tuple'>, length: 3
 python using/output_result.py --pkl data1/UAV_Videos/cropped_1min/output/cropped_1min/det_bbox_result_cropped_1min.pkl
 解析输出的pkl格式-------->xlsx
 # 导出到同目录 saving/ 下的 csv/xlsx
-
+python using/output_result.py --pkl data1/UAV_Videos/simpleround_road_config/output\simpleround_road\det_bbox_result_simpleround_road.pkl
 
 
 

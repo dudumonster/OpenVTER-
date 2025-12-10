@@ -23,6 +23,7 @@ WORLD_COORD_NAMES = [
     "x1_world", "y1_world", "x2_world", "y2_world",
     "x3_world", "y3_world", "x4_world", "y4_world"
 ]
+CATEGORY_NAMES = ["car", "truck", "bus", "freight_car", "van"]
 
 
 def parse_args():
@@ -98,6 +99,14 @@ def add_heading_velocity(df, fps):
     return df
 
 
+def add_category_name(df):
+    if "category" not in df.columns:
+        return df
+    cat_map = {i: name for i, name in enumerate(CATEGORY_NAMES)}
+    df["category_name"] = df["category"].map(cat_map)
+    return df
+
+
 def main():
     args = parse_args()
     pkl_path = Path(args.pkl)
@@ -139,6 +148,7 @@ def main():
     df = pd.DataFrame(records)
     df = compute_centers(df)
     df = add_track_lifetime(df)
+    df = add_category_name(df)
     df = add_heading_velocity(df, fps)
 
     csv_path = output_dir / f"{base_name}.csv"

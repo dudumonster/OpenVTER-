@@ -36,6 +36,7 @@ class DroneVideoProcess:
         self.road_config = self._load_road_config(config_dict.get('road_config',None))
         self.mask = self.road_config['det_mask']
         self.axis_image = self.road_config['axis_image']
+        self.length_per_pixel = self.road_config.get('length_per_pixel', None)
         # self.split = splitbase('','',subsize_height=812,
         #          subsize_width=940)
         self.split_gap = config_dict.get('split_gap',100)
@@ -69,6 +70,9 @@ class DroneVideoProcess:
         self.debug_lane_log = config_dict.get('debug_lane_log', False)
         self.debug_lane_draw = config_dict.get('debug_lane_draw', False)
         self.background_image_ls = []
+
+        # 掩膜调试：只打印一次掩膜统计，避免刷屏
+        self._mask_logged = False
 
         self.bbox_label = config_dict.get('bbox_label',['id','score','xy'])
         _,video_name_ext = os.path.split(self.video_file[0])
@@ -283,6 +287,10 @@ class DroneVideoProcess:
                 if m.dtype != np.uint8:
                     # 只要非 0 就当 255，用于 bitwise_and
                     m = (m != 0).astype(np.uint8) * 255
+                # 仅首次打印掩膜统计，确认掩膜已生效
+                if not self._mask_logged:
+                    print(f"[mask_debug] sum={int(m.sum())}, shape={m.shape}, dtype={m.dtype}")
+                    self._mask_logged = True
                 # 空掩膜就跳过，避免黑屏
                 if int(m.sum()) == 0:
                     if not self._mask_warned:
@@ -347,12 +355,24 @@ class DroneVideoProcess:
             all_bbox = torch.vstack(new_nms_ls)
             dets, keep_inds = nms_rotated(all_bbox[:, :5], all_bbox[:, 5], 0.3)
             nms_all_bbox = all_bbox[keep_inds]
+            # —— 简单截断，避免候选过多导致跟踪/IoU 计算爆内存
+            max_det = getattr(self, "max_object_num", None)
+            if max_det is None:
+                # 从检测配置里读取（与 centernet_bbavectors 配置保持一致）
+                max_det = self.det_model.__dict__.get("max_object_num", None)
+            if max_det is None:
+                max_det = 500  # 默认限制 500 个框，可按需调小
+            if nms_all_bbox.shape[0] > max_det:
+                scores = nms_all_bbox[:, 5]
+                _, topk_idx = torch.topk(scores, k=max_det)
+                nms_all_bbox = nms_all_bbox[topk_idx]
             if nms_all_bbox.device.type == 'cpu':
                 det_raw = nms_all_bbox.numpy()
             else:
                 det_raw = nms_all_bbox.data.cpu().numpy()
             o_bboxs_res = self.mot_tracker.update(nms_all_bbox,frame)
             o_bboxs_res = self._pixel_to_xy(o_bboxs_res)
+            o_bboxs_res = self._assign_vehicle_cat_by_length(o_bboxs_res)
             o_bboxs_res, lane_centers, lane_ids = self._get_lane_id(o_bboxs_res, frame_index)
             nms_img = self.det_model.draw_oriented_bboxs(frame, o_bboxs_res,self.bbox_label)
             if self.debug_lane_draw and len(lane_centers) > 0:
@@ -463,6 +483,59 @@ class DroneVideoProcess:
             cv2.circle(image, pt, 6, color, 2, cv2.LINE_AA)
             cv2.putText(image, f"L{lane}", (pt[0]+4, pt[1]-4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+    # —— 按车长规则重写类别：避免重训，输出更细分类型
+    def _assign_vehicle_cat_by_length(self, nms_result):
+        """
+        根据旋转框的物理长度（优先使用 pixel2xy 后的世界坐标）重新分配类别。
+        返回修改后的 nms_result（原地副本被修改）。
+        """
+        if nms_result is None or nms_result.shape[0] == 0:
+            return nms_result
+
+        # 确定类别列索引，兼容 11/19/20 列格式
+        cat_idx = 9 if nms_result.shape[1] > 9 else None
+        if cat_idx is None:
+            return nms_result
+
+        # 提取像素四点
+        pts_px = nms_result[:, :8].reshape(-1, 4, 2)
+
+        # 优先使用世界坐标（存在于末尾 8 列）
+        use_world = nms_result.shape[1] >= 19
+        if use_world:
+            pts_world = nms_result[:, -8:].reshape(-1, 4, 2)
+            pts_for_len = pts_world
+        else:
+            pts_for_len = pts_px
+
+        def quad_max_len(q):
+            # 四点两两距离的最大值
+            dif = q[:, None, :] - q[None, :, :]
+            dist = np.sqrt((dif ** 2).sum(-1))
+            return dist.max()
+
+        lengths = np.array([quad_max_len(p) for p in pts_for_len], dtype=np.float32)
+        # 若使用像素长度且有 length_per_pixel，则转为米
+        if (not use_world) and self.length_per_pixel:
+            lengths = lengths * float(self.length_per_pixel)
+
+        new_cats = []
+        for L in lengths:
+            # 车长粗分 5 类：car < van < truck < bus < freight_car（长挂/重挂）
+            if L < 4.8:
+                new_cats.append(0)  # car 小轿车/小客车
+            elif L < 6.8:
+                new_cats.append(4)  # van 面包/轻客/小型厢式
+            elif L < 9.5:
+                new_cats.append(1)  # truck 中/重型货车（非挂车）
+            elif L < 12.0:
+                new_cats.append(2)  # bus 公交/大客车
+            else:
+                new_cats.append(3)  # freight_car 长挂/重挂/超长厢式
+
+        nms_result[:, cat_idx] = np.array(new_cats, dtype=nms_result.dtype)
+        return nms_result
     #
 
 if __name__ == '__main__':

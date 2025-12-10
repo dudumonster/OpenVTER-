@@ -462,12 +462,24 @@ def visualize_config(config_json, img_path=None):
     line_color = (100, 30, 220)
     thickness = 2
     length_per_pixel = road_config['length_per_pixel']
+    # 如果没有绘制行车线（drivingline）或缺少标尺信息，直接返回已叠加的车道可视化结果
+    if not drivingline or length_per_pixel is None:
+        return img
 
     from toolbox.module.DrivingLine import DrivingLineList
     drivingline_ls = DrivingLineList([config_json])
+    # 当前配置不存在 drivingline 定义时直接返回，避免下标越界
+    if not drivingline_ls.drivingline_name_list:
+        return img
+
     drivingline_name = drivingline_ls.drivingline_name_list[0]
     if len(drivingline_ls.drivingline[drivingline_name].base_dist_dict) == 1:
         position_id = list(drivingline_ls.drivingline[drivingline_name].base_dist_dict.keys())[0]
+    else:
+        position_id = None
+    # 未能获取到基准位置时跳过行车线标记
+    if position_id is None:
+        return img
 
     length_m = 50 # 10 meters
     pixel_length = length_m / length_per_pixel

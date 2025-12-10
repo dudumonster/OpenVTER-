@@ -5,6 +5,10 @@ Video stabilization  视频稳定
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300.json
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/Reduced_video.json（通过这个指令我试了裁剪视频，减少我的实验时间-输出没问题；裁剪没问题；导出没问题）
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/simple_road_config.json
+python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300.json
+python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300_yolox_linux.json
+
+
 
 Vehicle detection and tracking
 车辆检测与跟踪
@@ -15,7 +19,7 @@ python video_inference_main.py -s 3 -c config/demo_config/video_config/touchv.js
 先完成视频稳定，生成映像，然后在完成检测和跟踪
 python video_inference_main.py -s 3 -c config/demo_config/video_config/Reduced_video.json
 python video_inference_main.py -s 3 -c config/demo_config/video_config/simple_road_config.json
-
+python video_inference_main.py -s 3 -c config/demo_config/video_config/20220303_5_E_300_yolox_linux.json（那个所谓的yoloxr模型鉴定为sb，不能用，应该在原来的基础上加一个车长判断）
 
 
 
@@ -58,7 +62,6 @@ Entry type: <class 'tuple'>, length: 3
 python using/output_result.py --pkl data1/UAV_Videos/cropped_1min/output/cropped_1min/det_bbox_result_cropped_1min.pkl
 解析输出的pkl格式-------->xlsx
 # 导出到同目录 saving/ 下的 csv/xlsx
-python using/output_result.py --pkl data1/UAV_Videos/simpleround_road_config/output\simpleround_road\det_bbox_result_simpleround_road.pkl
 
 
 
@@ -68,6 +71,7 @@ python using/output_result.py --pkl data1/UAV_Videos/simpleround_road_config/out
 
 
 
+config\demo_config\road_config\background_simple_road.json
 
 🎞 基础信息	recording_id	文件名/视频名（此处为 det_bbox_result_cropped_1min）
 	frame_index	当前帧编号（从 0 开始）
@@ -83,7 +87,7 @@ python using/output_result.py --pkl data1/UAV_Videos/simpleround_road_config/out
 🛣 车道信息	lane_id	车辆所在车道编号（1~8）
 📍 中心点坐标（像素系）	xCenter_px, yCenter_px	检测框中心像素坐标（由四点均值计算）
 
-python using/visualize_road_config.py --road-config config/demo_config/road_config/20220303_5_E_300_1.json --output out_fp_preview.jpg --background "C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER\data1\UAV_Videos\cropped_1min\output\cropped_1min\background_cropped_1min.jpg" 
+python using/visualize_road_config.py --road-config config/demo_config/road_config/background_simple_road.json --output test1.jpg --background "C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER\data1\UAV_Videos\simple_road_config\output\simple_road\background_simple_road.jpg" 
 
 
 数据标注：暂停->continue

@@ -1,0 +1,12 @@
+{
+  "model_name": "yolov5",
+  "checkpoint": "checkpoints/tph-yolov5/yolov5l-xs-1.pt",
+  "repo_dir": "tph-yolov5",
+  "device_name": "cuda:0",
+  "confidence": 0.25,
+  "nms_iou": 0.45,
+  "img_width": 640,
+  "img_height": 640,
+  "classes": [0, 1, 2, 6, 7, 9],
+  "class_id_map": [5, 6, 7, 0, 0, 0, 8, 9, 0, 10]
+}

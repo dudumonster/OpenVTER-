@@ -27,6 +27,8 @@ class VehicleTrackingModule:
         self.__dict__.update(self._defaults)
         for name, value in kwargs.items():
             setattr(self, name, value)
+        self.class_ids = getattr(self, "class_ids", None)
+        self.id_offset = int(getattr(self, "id_offset", 0) or 0)
         self.mot_tracker = self.load_model()
         if 'device' in kwargs.keys():
             self.device = torch.device(self.device)
@@ -70,6 +72,8 @@ class VehicleTrackingModule:
             result = self.mot_tracker.add_det_data(dets,ori_img,self.device)
         else:
             result = self.mot_tracker.add_det_data(dets,self.device)
+        if self.id_offset and result is not None and isinstance(result, np.ndarray) and result.size:
+            result[:, -1] = result[:, -1] + self.id_offset
         # end_t = time.time()
         # num = result.shape[0]
         # print('update time:%.3f,num:%d,each num:%.5f'%(end_t-start_t,num,(end_t-start_t)/num))

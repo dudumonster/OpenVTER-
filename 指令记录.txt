@@ -7,7 +7,7 @@ python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/Redu
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/simple_road_config.json
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300.json
 python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300_yolox_linux.json
-
+python video_inference_main.py -s 1 -e 1 -c config/demo_config/video_config/20220303_5_E_300_fusion_yolov5.json
 
 
 Vehicle detection and tracking
@@ -20,7 +20,7 @@ python video_inference_main.py -s 3 -c config/demo_config/video_config/touchv.js
 python video_inference_main.py -s 3 -c config/demo_config/video_config/Reduced_video.json
 python video_inference_main.py -s 3 -c config/demo_config/video_config/simple_road_config.json
 python video_inference_main.py -s 3 -c config/demo_config/video_config/20220303_5_E_300_yolox_linux.json（那个所谓的yoloxr模型鉴定为sb，不能用，应该在原来的基础上加一个车长判断）
-
+python video_inference_main.py -s 3 -c config/demo_config/video_config/20220303_5_E_300_fusion_yolov5.json
 
 
 output_result.py-----（将输出的pkl文件转化为csv/xlsx文件）
@@ -58,16 +58,12 @@ Entry type: <class 'tuple'>, length: 3
 （测试）-------------->确认无误！！！
 
 
-
 python using/output_result.py --pkl data1/UAV_Videos/cropped_1min/output/cropped_1min/det_bbox_result_cropped_1min.pkl
 python using/output_result.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass/det_bbox_result_test_multiclass.pkl
 解析输出的pkl格式-------->xlsx
+python using/output_result.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass_Num_3/det_bbox_result_test_multiclass.pkl
+解析输出的pkl格式-------->xlsx
 # 导出到同目录 saving/ 下的 csv/xlsx
-
-
-
-
-
 
 
 
@@ -93,4 +89,17 @@ python using/visualize_road_config.py --road-config config/demo_config/road_conf
 
 数据标注：暂停->continue
 labelme "C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER\config\demo_config\road_config\background_simple_road.json"
+
+weights\yolov5l-xs-1.pt的类别
+=== class order (model id -> name) ===
+0: pedestrian
+1: people
+2: bicycle
+3: car
+4: van
+5: truck
+6: tricycle
+7: awning-tricycle
+8: bus
+9: motor
 

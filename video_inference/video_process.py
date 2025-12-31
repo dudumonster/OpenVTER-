@@ -75,6 +75,8 @@ class DroneVideoProcess:
         self._mask_logged = False
 
         self.bbox_label = config_dict.get('bbox_label',['id','score','xy'])
+        self.global_category = config_dict.get('global_category', None)
+        self.global_color_pans = config_dict.get('global_color_pans', None)
         _,video_name_ext = os.path.split(self.video_file[0])
         self.video_name, extension = os.path.splitext(video_name_ext)
         if len(self.video_file)==1:
@@ -83,10 +85,20 @@ class DroneVideoProcess:
             self.save_folder = os.path.join(self.save_folder, self.video_name+"_Num_%d"%len(self.video_file))
         os.makedirs(self.save_folder,exist_ok=True)
         # 目标检测
-        self.det_model = self._get_det_model(config_dict.get('detection'))
+        self.det_models = self._get_det_models(config_dict.get('detection'))
+        if len(self.det_models) == 0:
+            raise ValueError("No detection model configured.")
+        self.det_model = self.det_models[0]  # legacy field used for drawing
+        if self.global_category is not None:
+            self.det_model.category = self.global_category
+        if self.global_color_pans is not None:
+            self.det_model.color_pans = self.global_color_pans
 
         # 跟踪模型
-        self.mot_tracker = self._get_tracking_model(config_dict.get('tracking'))
+        self.mot_trackers = self._get_tracking_models(config_dict.get('tracking'))
+        if len(self.mot_trackers) == 0:
+            raise ValueError("No tracking model configured.")
+        self.mot_tracker = self.mot_trackers[0]  # legacy field
 
         # 稳定
         if 'stab' in self.pipeline:
@@ -138,6 +150,20 @@ class DroneVideoProcess:
     def _get_tracking_model(self,config):
         tracking_model = VehicleTrackingModule(**config)
         return tracking_model
+
+    def _get_det_models(self, config):
+        if config is None:
+            return []
+        if isinstance(config, list):
+            return [self._get_det_model(c) for c in config]
+        return [self._get_det_model(config)]
+
+    def _get_tracking_models(self, config):
+        if config is None:
+            return []
+        if isinstance(config, list):
+            return [VehicleTrackingModule(**c) for c in config]
+        return [VehicleTrackingModule(**config)]
 
     def _get_mask(self,mask_json_file):
         if mask_json_file is None or mask_json_file == '':
@@ -322,16 +348,17 @@ class DroneVideoProcess:
             e = min(i+self.inference_batch_size,len(sub_imgs))
             select_imgs = sub_imgs[s:e]
             select_positions = self.sub_positions[s:e]
-            nms_results_ls = self.det_model.inference_img_batch(select_imgs)
-            for nms_results,position in zip(nms_results_ls,select_positions):
-                if nms_results is None:
-                    continue
-                x, y = position
+            for det_model in self.det_models:
+                nms_results_ls = det_model.inference_img_batch(select_imgs)
+                for nms_results,position in zip(nms_results_ls,select_positions):
+                    if nms_results is None:
+                        continue
+                    x, y = position
 
-                position_arr = np.array([x, y, 0, 0, 0, x, y, x, y, x, y, x, y,0, 0],dtype=np.float32)#字段偏移量
-                position_arr_t = torch.from_numpy(position_arr).to(self.det_model.device)# 将位置信息转换为tensor
-                new_nms = nms_results + position_arr_t# 将检测结果与位置信息相加，得到新的检测结果
-                new_nms_ls.append(new_nms)
+                    position_arr = np.array([x, y, 0, 0, 0, x, y, x, y, x, y, x, y,0, 0],dtype=np.float32)#字段偏移量
+                    position_arr_t = torch.from_numpy(position_arr).to(det_model.device)# 将位置信息转换为tensor
+                    new_nms = nms_results + position_arr_t# 将检测结果与位置信息相加，得到新的检测结果
+                    new_nms_ls.append(new_nms)
         t3 = time.time()
         # 坐标轴
         if self.axis_image is not None:
@@ -341,7 +368,8 @@ class DroneVideoProcess:
         lane_centers = np.empty((0, 2))
         lane_ids = []
         if len(new_nms_ls)==0:
-            self.mot_tracker.update()
+            for trk in self.mot_trackers:
+                trk.update()
             nms_img = frame
             if self.road_config['pixel2xy_matrix'] is not None:
                 if len(self.road_config['lane'])==0:
@@ -353,7 +381,11 @@ class DroneVideoProcess:
             lane_ids = []
         else:
             all_bbox = torch.vstack(new_nms_ls)
-            dets, keep_inds = nms_rotated(all_bbox[:, :5], all_bbox[:, 5], 0.3)
+            # all_bbox: [cx,cy,w,h,theta,x1,y1,x2,y2,x3,y3,x4,y4,score,cat]
+            score_col = 13
+            cat_col = 14
+            nms_iou = float(getattr(self.det_model, "nms_iou", 0.3))
+            dets, keep_inds = nms_rotated(all_bbox[:, :5], all_bbox[:, score_col], nms_iou, all_bbox[:, cat_col])
             nms_all_bbox = all_bbox[keep_inds]
             # —— 简单截断，避免候选过多导致跟踪/IoU 计算爆内存
             max_det = getattr(self, "max_object_num", None)
@@ -363,16 +395,33 @@ class DroneVideoProcess:
             if max_det is None:
                 max_det = 500  # 默认限制 500 个框，可按需调小
             if nms_all_bbox.shape[0] > max_det:
-                scores = nms_all_bbox[:, 5]
+                scores = nms_all_bbox[:, score_col]
                 _, topk_idx = torch.topk(scores, k=max_det)
                 nms_all_bbox = nms_all_bbox[topk_idx]
             if nms_all_bbox.device.type == 'cpu':
                 det_raw = nms_all_bbox.numpy()
             else:
                 det_raw = nms_all_bbox.data.cpu().numpy()
-            o_bboxs_res = self.mot_tracker.update(nms_all_bbox,frame)
+            o_bboxs_res_parts = []
+            for trk in self.mot_trackers:
+                class_ids = getattr(trk, "class_ids", None)
+                if class_ids is None:
+                    dets_subset = nms_all_bbox
+                else:
+                    mask = torch.zeros((nms_all_bbox.shape[0],), dtype=torch.bool, device=nms_all_bbox.device)
+                    cats = nms_all_bbox[:, cat_col].round()
+                    for cid in class_ids:
+                        mask |= (cats == float(cid))
+                    dets_subset = nms_all_bbox[mask]
+                part = trk.update(dets_subset, frame)
+                if part is not None and isinstance(part, np.ndarray) and part.size:
+                    o_bboxs_res_parts.append(part)
+            if len(o_bboxs_res_parts):
+                o_bboxs_res = np.vstack(o_bboxs_res_parts)
+            else:
+                o_bboxs_res = np.empty((0, 11))
             o_bboxs_res = self._pixel_to_xy(o_bboxs_res)
-            o_bboxs_res = self._assign_vehicle_cat_by_length(o_bboxs_res)
+            o_bboxs_res = self._assign_vehicle_cat_by_length_masked(o_bboxs_res, vehicle_class_ids=[0, 1, 2, 3, 4])
             o_bboxs_res, lane_centers, lane_ids = self._get_lane_id(o_bboxs_res, frame_index)
             nms_img = self.det_model.draw_oriented_bboxs(frame, o_bboxs_res,self.bbox_label)
             if self.debug_lane_draw and len(lane_centers) > 0:
@@ -535,6 +584,20 @@ class DroneVideoProcess:
                 new_cats.append(3)  # freight_car 长挂/重挂/超长厢式
 
         nms_result[:, cat_idx] = np.array(new_cats, dtype=nms_result.dtype)
+        return nms_result
+
+    def _assign_vehicle_cat_by_length_masked(self, nms_result, vehicle_class_ids):
+        if nms_result is None or nms_result.shape[0] == 0:
+            return nms_result
+        cat_idx = 9 if nms_result.shape[1] > 9 else None
+        if cat_idx is None:
+            return nms_result
+        veh_set = set(int(x) for x in vehicle_class_ids)
+        cats = nms_result[:, cat_idx].astype(np.int32)
+        mask = np.array([c in veh_set for c in cats], dtype=bool)
+        if not mask.any():
+            return nms_result
+        nms_result[mask] = self._assign_vehicle_cat_by_length(nms_result[mask])
         return nms_result
     #
 

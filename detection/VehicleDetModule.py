@@ -13,6 +13,7 @@ import numpy as np
 import cv2
 from mmcv.ops import nms_rotated
 from collections import deque
+import ast
 
 
 class VehicleDetModule:
@@ -24,6 +25,7 @@ class VehicleDetModule:
         "img_height": 640,
         "category": ['car','truck','bus','freight_car','van'],
         "color_pans": [(204,78,210),(0,192,255), (0,131,0),(240,176,0), (254,100,38)],
+        "class_id_map": None,
 
                  }
     @classmethod
@@ -44,7 +46,8 @@ class VehicleDetModule:
         else:
             print('no cuda!')
         # self.device = torch.device(self.device)
-        self.color_pans = eval(self.color_pans)
+        if isinstance(self.color_pans, str):
+            self.color_pans = ast.literal_eval(self.color_pans)
 
         self.Vehicles = {}
         self.MAXLEN = 30
@@ -77,6 +80,19 @@ class VehicleDetModule:
             from detection.mmrotate.detector import MMDet
 
             self.model = MMDet(self.cfg,self.checkpoint,self.score_thresh,self.device_name)
+        elif self.model_name == 'yolov5':
+            from detection.yolov5.yolo import YOLOv5
+            yolo_dict = {
+                "weights": self.checkpoint,
+                "device_name": self.device_name,
+                "imgsz": [self.img_width, self.img_height],
+                "confidence": self.confidence,
+                "nms_iou": self.nms_iou,
+                "repo_dir": getattr(self, "repo_dir", None),
+                "classes": getattr(self, "classes", None),
+                "agnostic_nms": getattr(self, "agnostic_nms", False),
+            }
+            self.model = YOLOv5(**yolo_dict)
 
     def _process_img_batch(self, ori_image_ls):
 
@@ -88,9 +104,31 @@ class VehicleDetModule:
         np_boxes = self.four_points2bbox_angle_tensor(predictions)
         boxes = torch.from_numpy(np_boxes).to(self.device)
         # labels = torch.from_numpy(np_labels).cuda()
-        dets, keep_inds = nms_rotated(boxes[:, :5], boxes[:, 5], 0.3,  boxes[:, 6])
+        # boxes: [cx,cy,w,h,theta,x1,y1,x2,y2,x3,y3,x4,y4,score,cat]
+        score_col = 13
+        cat_col = 14
+        dets, keep_inds = nms_rotated(boxes[:, :5], boxes[:, score_col], float(self.nms_iou), boxes[:, cat_col])
         # print(dets)
-        return boxes[keep_inds]
+        kept = boxes[keep_inds]
+        if self.class_id_map is not None:
+            kept[:, cat_col] = self._remap_class_ids(kept[:, cat_col])
+        return kept
+
+    def _remap_class_ids(self, cat_tensor):
+        mapping = self.class_id_map
+        if mapping is None:
+            return cat_tensor
+        if isinstance(mapping, str):
+            mapping = ast.literal_eval(mapping)
+        if isinstance(mapping, dict):
+            max_key = max(int(k) for k in mapping.keys()) if mapping else -1
+            map_list = [0] * (max_key + 1)
+            for k, v in mapping.items():
+                map_list[int(k)] = int(v)
+            mapping = map_list
+        map_tensor = torch.tensor(mapping, dtype=cat_tensor.dtype, device=cat_tensor.device)
+        idx = cat_tensor.round().to(torch.long).clamp_(0, map_tensor.numel() - 1)
+        return map_tensor[idx]
 
     def four_points2bbox_angle_tensor(self,predictions):
         # predictions = predictions.cpu().numpy()

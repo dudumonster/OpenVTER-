@@ -60,18 +60,54 @@ class Config:
             return base_dict
         if 'detection' in config_dict:
             detection_json = config_dict['detection']
-            detection_json_filename = os.path.join(folder, detection_json)
-            check_file_exist(detection_json_filename)
-            with open(detection_json_filename, 'r') as f:
-                detection_dict = json.load(f)
-            config_dict['detection'] = detection_dict
+            if isinstance(detection_json, list):
+                detection_dicts = []
+                for item in detection_json:
+                    if isinstance(item, str):
+                        detection_json_filename = os.path.join(folder, item)
+                        check_file_exist(detection_json_filename)
+                        with open(detection_json_filename, 'r') as f:
+                            detection_dicts.append(json.load(f))
+                    elif isinstance(item, dict):
+                        detection_dicts.append(item)
+                    else:
+                        raise TypeError("detection list items must be str or dict")
+                config_dict['detection'] = detection_dicts
+            elif isinstance(detection_json, str):
+                detection_json_filename = os.path.join(folder, detection_json)
+                check_file_exist(detection_json_filename)
+                with open(detection_json_filename, 'r') as f:
+                    detection_dict = json.load(f)
+                config_dict['detection'] = detection_dict
+            elif isinstance(detection_json, dict):
+                config_dict['detection'] = detection_json
+            else:
+                raise TypeError("detection must be str, dict, or list")
         if 'tracking' in config_dict:
             tracking_json = config_dict['tracking']
-            tracking_json_filename = os.path.join(folder, tracking_json)
-            check_file_exist(tracking_json_filename)
-            with open(tracking_json_filename, 'r') as f:
-                tracking_dict = json.load(f)
-            config_dict['tracking'] = tracking_dict
+            if isinstance(tracking_json, list):
+                tracking_dicts = []
+                for item in tracking_json:
+                    if isinstance(item, str):
+                        tracking_json_filename = os.path.join(folder, item)
+                        check_file_exist(tracking_json_filename)
+                        with open(tracking_json_filename, 'r') as f:
+                            tracking_dicts.append(json.load(f))
+                    elif isinstance(item, dict):
+                        tracking_dicts.append(item)
+                    else:
+                        raise TypeError("tracking list items must be str or dict")
+                config_dict['tracking'] = tracking_dicts
+            elif isinstance(tracking_json, str):
+                tracking_json_filename = os.path.join(folder, tracking_json)
+                check_file_exist(tracking_json_filename)
+                with open(tracking_json_filename, 'r') as f:
+                    tracking_dict = json.load(f)
+                config_dict['tracking'] = tracking_dict
+            elif isinstance(tracking_json, dict):
+                config_dict['tracking'] = tracking_json
+            else:
+                raise TypeError("tracking must be str, dict, or list")
 
         return config_dict
 

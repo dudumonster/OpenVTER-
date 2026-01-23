@@ -15,6 +15,7 @@ import json
 import pickle
 import numpy as np
 import torch
+from collections import deque, Counter
 from mmcv.ops import nms_rotated
 
 
@@ -77,6 +78,16 @@ class DroneVideoProcess:
         self.bbox_label = config_dict.get('bbox_label',['id','score','xy'])
         self.global_category = config_dict.get('global_category', None)
         self.global_color_pans = config_dict.get('global_color_pans', None)
+        self.track_cat_smooth = bool(config_dict.get('track_cat_smooth', True))
+        self.track_cat_window = int(config_dict.get('track_cat_window', 7))
+        self.track_cat_min_samples = int(config_dict.get('track_cat_min_samples', 3))
+        self.track_len_smooth = bool(config_dict.get('track_len_smooth', True))
+        self.track_len_window = int(config_dict.get('track_len_window', 7))
+        self.track_history_ttl = int(config_dict.get('track_history_ttl', 200))
+        self.vehicle_length_thresholds = config_dict.get('vehicle_length_thresholds', [4.8, 6.8, 9.5, 12.0])
+        self.track_cat_history = {}
+        self.track_len_history = {}
+        self.track_last_seen = {}
         _,video_name_ext = os.path.split(self.video_file[0])
         self.video_name, extension = os.path.splitext(video_name_ext)
         if len(self.video_file)==1:
@@ -422,6 +433,11 @@ class DroneVideoProcess:
                 o_bboxs_res = np.empty((0, 11))
             o_bboxs_res = self._pixel_to_xy(o_bboxs_res)
             o_bboxs_res = self._assign_vehicle_cat_by_length_masked(o_bboxs_res, vehicle_class_ids=[0, 1, 2, 3, 4])
+            o_bboxs_res = self._stabilize_track_categories(
+                o_bboxs_res,
+                frame_index=frame_index,
+                vehicle_class_ids=[0, 1, 2, 3, 4],
+            )
             o_bboxs_res, lane_centers, lane_ids = self._get_lane_id(o_bboxs_res, frame_index)
             nms_img = self.det_model.draw_oriented_bboxs(frame, o_bboxs_res,self.bbox_label)
             if self.debug_lane_draw and len(lane_centers) > 0:
@@ -534,6 +550,90 @@ class DroneVideoProcess:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
     # —— 按车长规则重写类别：避免重训，输出更细分类型
+    def _vehicle_cat_from_length(self, length_val):
+        t = self.vehicle_length_thresholds
+        if length_val < t[0]:
+            return 0  # car
+        if length_val < t[1]:
+            return 4  # van
+        if length_val < t[2]:
+            return 1  # truck
+        if length_val < t[3]:
+            return 2  # bus
+        return 3  # freight_car
+
+    def _compute_bbox_lengths(self, nms_result):
+        if nms_result is None or nms_result.shape[0] == 0:
+            return None
+        pts_px = nms_result[:, :8].reshape(-1, 4, 2)
+        use_world = nms_result.shape[1] >= 19
+        if use_world:
+            if nms_result.shape[1] >= 20:
+                pts_for_len = nms_result[:, 11:19].reshape(-1, 4, 2)
+            else:
+                pts_for_len = nms_result[:, -8:].reshape(-1, 4, 2)
+        else:
+            pts_for_len = pts_px
+        dif = pts_for_len[:, :, None, :] - pts_for_len[:, None, :, :]
+        dist = np.sqrt((dif ** 2).sum(-1))
+        lengths = dist.max(axis=(1, 2))
+        if (not use_world) and self.length_per_pixel:
+            lengths = lengths * float(self.length_per_pixel)
+        return lengths
+
+    def _stabilize_track_categories(self, nms_result, frame_index=None, vehicle_class_ids=None):
+        if not self.track_cat_smooth:
+            return nms_result
+        if nms_result is None or nms_result.shape[0] == 0:
+            return nms_result
+        if nms_result.shape[1] <= 10:
+            return nms_result
+        cat_idx = 9
+        id_idx = 10
+        vehicle_set = set(int(x) for x in (vehicle_class_ids or []))
+        lengths = None
+        if self.track_len_smooth and self.track_len_window > 1:
+            lengths = self._compute_bbox_lengths(nms_result)
+        for i in range(nms_result.shape[0]):
+            track_id = int(nms_result[i, id_idx])
+            cat = int(round(nms_result[i, cat_idx]))
+            if frame_index is not None:
+                self.track_last_seen[track_id] = frame_index
+            if self.track_cat_window > 1:
+                hist = self.track_cat_history.setdefault(track_id, deque(maxlen=self.track_cat_window))
+                hist.append(cat)
+            if lengths is not None and cat in vehicle_set:
+                len_hist = self.track_len_history.setdefault(track_id, deque(maxlen=self.track_len_window))
+                len_hist.append(float(lengths[i]))
+
+        for i in range(nms_result.shape[0]):
+            track_id = int(nms_result[i, id_idx])
+            cur_cat = int(round(nms_result[i, cat_idx]))
+            new_cat = cur_cat
+            hist = self.track_cat_history.get(track_id, None)
+            is_vehicle_track = cur_cat in vehicle_set
+            if not is_vehicle_track and hist:
+                veh_votes = sum(1 for c in hist if c in vehicle_set)
+                is_vehicle_track = veh_votes >= max(1, len(hist) // 2)
+            if self.track_len_smooth and is_vehicle_track and track_id in self.track_len_history and self.track_len_history[track_id]:
+                L_med = float(np.median(self.track_len_history[track_id]))
+                new_cat = self._vehicle_cat_from_length(L_med)
+            else:
+                if hist and len(hist) >= self.track_cat_min_samples:
+                    counts = Counter(hist)
+                    most = counts.most_common()
+                    if len(most) == 1 or most[0][1] > most[1][1]:
+                        new_cat = int(most[0][0])
+            nms_result[i, cat_idx] = new_cat
+
+        if frame_index is not None and self.track_history_ttl > 0 and frame_index % 50 == 0:
+            stale = [tid for tid, last in self.track_last_seen.items() if frame_index - last > self.track_history_ttl]
+            for tid in stale:
+                self.track_last_seen.pop(tid, None)
+                self.track_cat_history.pop(tid, None)
+                self.track_len_history.pop(tid, None)
+        return nms_result
+
     def _assign_vehicle_cat_by_length(self, nms_result):
         """
         根据旋转框的物理长度（优先使用 pixel2xy 后的世界坐标）重新分配类别。
@@ -542,47 +642,14 @@ class DroneVideoProcess:
         if nms_result is None or nms_result.shape[0] == 0:
             return nms_result
 
-        # 确定类别列索引，兼容 11/19/20 列格式
         cat_idx = 9 if nms_result.shape[1] > 9 else None
         if cat_idx is None:
             return nms_result
 
-        # 提取像素四点
-        pts_px = nms_result[:, :8].reshape(-1, 4, 2)
-
-        # 优先使用世界坐标（存在于末尾 8 列）
-        use_world = nms_result.shape[1] >= 19
-        if use_world:
-            pts_world = nms_result[:, -8:].reshape(-1, 4, 2)
-            pts_for_len = pts_world
-        else:
-            pts_for_len = pts_px
-
-        def quad_max_len(q):
-            # 四点两两距离的最大值
-            dif = q[:, None, :] - q[None, :, :]
-            dist = np.sqrt((dif ** 2).sum(-1))
-            return dist.max()
-
-        lengths = np.array([quad_max_len(p) for p in pts_for_len], dtype=np.float32)
-        # 若使用像素长度且有 length_per_pixel，则转为米
-        if (not use_world) and self.length_per_pixel:
-            lengths = lengths * float(self.length_per_pixel)
-
-        new_cats = []
-        for L in lengths:
-            # 车长粗分 5 类：car < van < truck < bus < freight_car（长挂/重挂）
-            if L < 4.8:
-                new_cats.append(0)  # car 小轿车/小客车
-            elif L < 6.8:
-                new_cats.append(4)  # van 面包/轻客/小型厢式
-            elif L < 9.5:
-                new_cats.append(1)  # truck 中/重型货车（非挂车）
-            elif L < 12.0:
-                new_cats.append(2)  # bus 公交/大客车
-            else:
-                new_cats.append(3)  # freight_car 长挂/重挂/超长厢式
-
+        lengths = self._compute_bbox_lengths(nms_result)
+        if lengths is None:
+            return nms_result
+        new_cats = [self._vehicle_cat_from_length(L) for L in lengths]
         nms_result[:, cat_idx] = np.array(new_cats, dtype=nms_result.dtype)
         return nms_result
 

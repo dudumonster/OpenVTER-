@@ -1,9 +1,9 @@
 import cv2
 
 # 输入视频路径
-input_video_path = 'data1/UAV_Videos/20220303_5_E_300/track/simpleround_road.mp4'
+input_video_path = 'E:\无人机采集数据\十字路口\昌吉路\DJI_0228.MP4'
 # 输出视频路径
-output_video_path = 'data1/UAV_Videos/20220303_5_E_300/track/test.mp4'
+output_video_path = 'data1/UAV_Videos/20220303_5_E_300/track/DJI_0228_cropped.mp4'
 
 # 设置裁剪时长（秒），可以是60（1分钟）或20（20秒）
 duration = 20  # 可以修改为20来裁剪20秒的视频

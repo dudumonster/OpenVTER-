@@ -62,6 +62,7 @@ python using/output_result.py --pkl data1/UAV_Videos/cropped_1min/output/cropped
 python using/output_result.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass/det_bbox_result_test_multiclass.pkl
 解析输出的pkl格式-------->xlsx
 python using/output_result.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass_Num_3/det_bbox_result_test_multiclass.pkl
+python using/output_result.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/det_bbox_result_test_multiclass_118.pkl
 解析输出的pkl格式-------->xlsx
 # 导出到同目录 saving/ 下的 csv/xlsx
 
@@ -89,6 +90,7 @@ python using/visualize_road_config.py --road-config config/demo_config/road_conf
 
 数据标注：暂停->continue
 labelme "C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER\config\demo_config\road_config\background_simple_road.json"
+labelme "C:\Users\ASUS\Desktop\OpenVTER-8f67ecdb2dcf161de85fc5fa496320b0fcf5720a\OpenVTER\config\demo_config\road_config\background_DJI_0228_cropped.json"
 
 weights\yolov5l-xs-1.pt的类别
 === class order (model id -> name) ===
@@ -102,4 +104,15 @@ weights\yolov5l-xs-1.pt的类别
 7: awning-tricycle
 8: bus
 9: motor
+
+分析缺失帧数：
+python using/diagnose_track_gaps.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/det_bbox_result_test_multiclass_118.pkl --output-dir data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/saving 
+
+
+python using/track_gap_fill_export.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/det_bbox_result_test_multiclass_118.pkl --output-dir data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/saving 
+
+
+
+python using/track_gap_fill_export.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/det_bbox_result_test_multiclass_118.pkl --smooth-method savgol --smooth-window 5 --sg-window 11 --sg-poly 2 --g1 4 --g2 12 --g3 30 --v-stop 0.25 --k-stop 15 --stat-window 30 --stat-ratio 0.8 
+
 

@@ -23,7 +23,19 @@ WORLD_COORD_NAMES = [
     "x1_world", "y1_world", "x2_world", "y2_world",
     "x3_world", "y3_world", "x4_world", "y4_world"
 ]
-CATEGORY_NAMES = ["car", "truck", "bus", "freight_car", "van"]
+CATEGORY_NAMES = [
+    "car",
+    "truck",
+    "bus",
+    "freight_car",
+    "van",
+    "pedestrian",
+    "people",
+    "bicycle",
+    "tricycle",
+    "awning-tricycle",
+    "motor",
+]
 
 
 def parse_args():
@@ -66,6 +78,20 @@ def add_track_lifetime(df):
     df["track_id"] = df["track_id"].astype(int)
     df.sort_values(["track_id", "frame_index"], inplace=True)
     df["track_lifetime"] = df.groupby("track_id").cumcount()
+    return df
+
+
+def stabilize_track_category(df):
+    if "category" not in df.columns or "track_id" not in df.columns:
+        return df
+    df["category"] = df["category"].astype(int)
+
+    def _majority_category(series):
+        counts = series.value_counts()
+        max_count = counts.max()
+        return int(counts[counts == max_count].index.min())
+
+    df["category"] = df.groupby("track_id")["category"].transform(_majority_category)
     return df
 
 
@@ -148,6 +174,7 @@ def main():
     df = pd.DataFrame(records)
     df = compute_centers(df)
     df = add_track_lifetime(df)
+    df = stabilize_track_category(df)
     df = add_category_name(df)
     df = add_heading_velocity(df, fps)
 

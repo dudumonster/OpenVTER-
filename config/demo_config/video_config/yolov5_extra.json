@@ -3,7 +3,7 @@
   "checkpoint": "checkpoints/tph-yolov5/yolov5l-xs-1.pt",
   "repo_dir": "tph-yolov5",
   "device_name": "cuda:0",
-  "confidence": 0.25,
+  "confidence": 0.2,
   "nms_iou": 0.45,
   "img_width": 640,
   "img_height": 640,

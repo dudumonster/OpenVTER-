@@ -1,0 +1,114 @@
+{
+  "version": "5.0.1",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "road",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          2287,
+          0
+        ],
+        [
+          2287,
+          1079
+        ],
+        [
+          0,
+          1079
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "polygon",
+      "flags": {}
+    },
+    {
+      "label": "fp",
+      "points": [
+        [
+          114,
+          54
+        ],
+        [
+          400,
+          189
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "rectangle",
+      "flags": {}
+    },
+    {
+      "label": "fp",
+      "points": [
+        [
+          1888,
+          54
+        ],
+        [
+          2174,
+          189
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "rectangle",
+      "flags": {}
+    },
+    {
+      "label": "fp",
+      "points": [
+        [
+          114,
+          891
+        ],
+        [
+          400,
+          1026
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "rectangle",
+      "flags": {}
+    },
+    {
+      "label": "fp",
+      "points": [
+        [
+          1888,
+          891
+        ],
+        [
+          2174,
+          1026
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "rectangle",
+      "flags": {}
+    },
+    {
+      "label": "length_10",
+      "points": [
+        [
+          228,
+          972
+        ],
+        [
+          457,
+          972
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "line",
+      "flags": {}
+    }
+  ],
+  "imagePath": "first_frame_xin_hao_deng_007.jpg",
+  "imageData": null,
+  "imageHeight": 1080,
+  "imageWidth": 2288
+}

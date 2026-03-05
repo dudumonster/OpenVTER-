@@ -1,0 +1,114 @@
+{
+  "version": "5.0.1",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "road",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          3839,
+          0
+        ],
+        [
+          3839,
+          2159
+        ],
+        [
+          0,
+          2159
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "polygon",
+      "flags": {}
+    },
+    {
+      "label": "fp",
+      "points": [
+        [
+          192,
+          108
+        ],
+        [
+          672,
+          378
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "rectangle",
+      "flags": {}
+    },
+    {
+      "label": "fp",
+      "points": [
+        [
+          3168,
+          108
+        ],
+        [
+          3648,
+          378
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "rectangle",
+      "flags": {}
+    },
+    {
+      "label": "fp",
+      "points": [
+        [
+          192,
+          1782
+        ],
+        [
+          672,
+          2052
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "rectangle",
+      "flags": {}
+    },
+    {
+      "label": "fp",
+      "points": [
+        [
+          3168,
+          1782
+        ],
+        [
+          3648,
+          2052
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "rectangle",
+      "flags": {}
+    },
+    {
+      "label": "length_10",
+      "points": [
+        [
+          384,
+          1944
+        ],
+        [
+          768,
+          1944
+        ]
+      ],
+      "group_id": null,
+      "shape_type": "line",
+      "flags": {}
+    }
+  ],
+  "imagePath": "first_frame_yin_hai_2_029.jpg",
+  "imageData": null,
+  "imageHeight": 2160,
+  "imageWidth": 3840
+}

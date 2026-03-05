@@ -111,8 +111,10 @@ python using/diagnose_track_gaps.py --pkl data1/UAV_Videos/simpleround_road_conf
 
 python using/track_gap_fill_export.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/det_bbox_result_test_multiclass_118.pkl --output-dir data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/saving 
 
+可视化展示
+streamlit run using/track_viz_app.py -- --xlsx data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/saving/det_bbox_result_test_multiclass_118_filled.xlsx    
 
-
-python using/track_gap_fill_export.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/det_bbox_result_test_multiclass_118.pkl --smooth-method savgol --smooth-window 5 --sg-window 11 --sg-poly 2 --g1 4 --g2 12 --g3 30 --v-stop 0.25 --k-stop 15 --stat-window 30 --stat-ratio 0.8 
+15的可以用----------->其中的内容是一个比较不错的结果
+python using/track_gap_fill_export.py --pkl data1/UAV_Videos/simpleround_road_config/output/test_multiclass_118/det_bbox_result_test_multiclass_118.pkl --smooth-method savgol --smooth-window 5 --sg-window 15 --sg-poly 2 --g1 4 --g2 12 --g3 30 --v-stop 0.25 --k-stop 15 --stat-window 30 --stat-ratio 0.8 
 
 

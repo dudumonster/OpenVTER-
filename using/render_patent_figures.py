@@ -17,6 +17,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 CANVAS_WIDTH = 2480
 CANVAS_HEIGHT = 3508
+LANDSCAPE_WIDTH = 3508
+LANDSCAPE_HEIGHT = 2480
 DPI = (300, 300)
 DEFAULT_OUTPUT_DIR = Path(
     r"F:\专利申请\一种基于多模型融合与轨迹物理约束的无人机航拍多类交通参与者轨迹提取方法、系统、设备及存储介质"
@@ -46,6 +48,10 @@ class Node:
 class Connector:
     points: tuple[tuple[int, int], ...]
     arrow: bool = True
+    line_width: int = LINE_WIDTH
+    arrow_head_length: int = ARROW_HEAD_LENGTH
+    arrow_head_half_width: int = ARROW_HEAD_HALF_WIDTH
+    arrow_gap: int = 0
 
 
 @dataclass(frozen=True)
@@ -53,6 +59,8 @@ class Diagram:
     file_stem: str
     nodes: tuple[Node, ...]
     connectors: tuple[Connector, ...]
+    width: int = CANVAS_WIDTH
+    height: int = CANVAS_HEIGHT
 
 
 def parse_args() -> argparse.Namespace:
@@ -155,12 +163,26 @@ def draw_connector(draw: ImageDraw.ImageDraw, connector: Connector) -> None:
     pts = connector.points
     if len(pts) < 2:
         return
-    for start, end in zip(pts[:-1], pts[1:]):
-        draw.line([start, end], fill=LINE_COLOR, width=LINE_WIDTH)
     if not connector.arrow:
+        for start, end in zip(pts[:-1], pts[1:]):
+            draw.line([start, end], fill=LINE_COLOR, width=connector.line_width)
         return
     start = pts[-2]
-    end = pts[-1]
+    raw_end = pts[-1]
+    dx = raw_end[0] - start[0]
+    dy = raw_end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return
+    ux = dx / length
+    uy = dy / length
+    end = (
+        int(round(raw_end[0] - ux * connector.arrow_gap)),
+        int(round(raw_end[1] - uy * connector.arrow_gap)),
+    )
+    for seg_start, seg_end in zip(pts[:-2], pts[1:-1]):
+        draw.line([seg_start, seg_end], fill=LINE_COLOR, width=connector.line_width)
+    draw.line([start, end], fill=LINE_COLOR, width=connector.line_width)
     dx = end[0] - start[0]
     dy = end[1] - start[1]
     length = math.hypot(dx, dy)
@@ -170,15 +192,21 @@ def draw_connector(draw: ImageDraw.ImageDraw, connector: Connector) -> None:
     uy = dy / length
     px = -uy
     py = ux
-    base_x = end[0] - ARROW_HEAD_LENGTH * ux
-    base_y = end[1] - ARROW_HEAD_LENGTH * uy
-    left = (base_x + ARROW_HEAD_HALF_WIDTH * px, base_y + ARROW_HEAD_HALF_WIDTH * py)
-    right = (base_x - ARROW_HEAD_HALF_WIDTH * px, base_y - ARROW_HEAD_HALF_WIDTH * py)
+    base_x = end[0] - connector.arrow_head_length * ux
+    base_y = end[1] - connector.arrow_head_length * uy
+    left = (
+        base_x + connector.arrow_head_half_width * px,
+        base_y + connector.arrow_head_half_width * py,
+    )
+    right = (
+        base_x - connector.arrow_head_half_width * px,
+        base_y - connector.arrow_head_half_width * py,
+    )
     draw.polygon([end, left, right], fill=LINE_COLOR)
 
 
 def render_diagram(diagram: Diagram, output_dir: Path, formats: Sequence[str]) -> list[Path]:
-    image = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), BACKGROUND)
+    image = Image.new("RGB", (diagram.width, diagram.height), BACKGROUND)
     draw = ImageDraw.Draw(image)
     for node in diagram.nodes:
         draw_node(draw, node)
@@ -256,16 +284,87 @@ def build_vertical_flow_diagram(file_stem: str, step_texts: Sequence[str], start
 
 
 def build_fig1() -> Diagram:
-    steps = [
-        "S1 获取无人机俯视视频及\n道路配置数据",
-        "S2 双掩膜预处理与\n视频稳像",
-        "S3 重叠滑窗分块与\n多模型并行推理",
-        "S4 统一旋转框表达与\n全局融合",
-        "S5 分组多目标跟踪与\n统一编号",
-        "S6 空间语义增强与\n车辆细分类稳定化",
-        "S7 轨迹补全与物理一致性\n约束输出",
-    ]
-    return build_vertical_flow_diagram("图1_本发明方法总体流程图", steps, start_end=True)
+    start = (90, 120, 390, 235)
+    s1 = (470, 105, 910, 250)
+    s21 = (990, 105, 1430, 250)
+    s22 = (1510, 105, 1950, 250)
+    s23 = (2030, 105, 2470, 250)
+    s31 = (2550, 105, 2990, 250)
+
+    s32 = (2170, 470, 2610, 615)
+    s33 = (2710, 470, 3150, 615)
+    s41 = (2250, 760, 3070, 905)
+    s42 = (2250, 1035, 3070, 1180)
+    s51 = (1820, 1320, 2260, 1465)
+    s52 = (2660, 1320, 3100, 1465)
+    s53 = (2225, 1595, 2695, 1740)
+
+    s61 = (2235, 1885, 2655, 2010)
+    s62 = (1715, 1885, 2135, 2010)
+    s63 = (1195, 1885, 1615, 2010)
+    s71 = (675, 1885, 1095, 2010)
+    s72 = (675, 2160, 1095, 2285)
+    s73 = (1195, 2160, 1615, 2285)
+    s74 = (1715, 2160, 2135, 2285)
+    end = (2235, 2160, 2655, 2285)
+
+    nodes = (
+        Node(text="开始", bbox=start, shape="ellipse", max_font_size=44, min_font_size=26),
+        Node(text="S1 获取无人机俯视视频及\n道路配置数据", bbox=s1, max_font_size=46, min_font_size=22),
+        Node(text="S2-1 在稳像掩膜内\n提取特征点", bbox=s21, max_font_size=46, min_font_size=22),
+        Node(text="S2-2 光流跟踪并估计\n部分仿射变换", bbox=s22, max_font_size=46, min_font_size=22),
+        Node(text="S2-3 稳像补偿并施加\n检测掩膜", bbox=s23, max_font_size=46, min_font_size=22),
+        Node(text="S3-1 重叠滑窗分块", bbox=s31, max_font_size=46, min_font_size=22),
+        Node(text="S3-2 旋转框车辆检测", bbox=s32, max_font_size=44, min_font_size=22),
+        Node(text="S3-3 多类交通参与者检测", bbox=s33, max_font_size=42, min_font_size=20),
+        Node(text="S4-1 类别映射与\n统一旋转框表达", bbox=s41, max_font_size=48, min_font_size=22),
+        Node(text="S4-2 回投原图并执行\n全局旋转NMS", bbox=s42, max_font_size=48, min_font_size=22),
+        Node(text="S5-1 机动车跟踪器组关联", bbox=s51, max_font_size=42, min_font_size=20),
+        Node(text="S5-2 弱势交通参与者\n跟踪器组关联", bbox=s52, max_font_size=42, min_font_size=20),
+        Node(text="S5-3 ID偏移统一编号并\n生成全局轨迹", bbox=s53, max_font_size=46, min_font_size=22),
+        Node(text="S6-1 像素-世界坐标映射", bbox=s61, max_font_size=42, min_font_size=20),
+        Node(text="S6-2 车道归属判定与\n车辆重分类", bbox=s62, max_font_size=44, min_font_size=20),
+        Node(text="S6-3 轨迹级类别\n时序平滑", bbox=s63, max_font_size=46, min_font_size=22),
+        Node(text="S7-1 缺帧分级补全", bbox=s71, max_font_size=44, min_font_size=22),
+        Node(text="S7-2 轨迹平滑与\n运动学计算", bbox=s72, max_font_size=46, min_font_size=22),
+        Node(text="S7-3 静止门控与\n物理约束校验", bbox=s73, max_font_size=44, min_font_size=20),
+        Node(text="S7-4 输出结构化轨迹及\n可视化结果", bbox=s74, max_font_size=44, min_font_size=20),
+        Node(text="结束", bbox=end, shape="ellipse", max_font_size=44, min_font_size=26),
+    )
+
+    detect_branch_y = 360
+    track_branch_y = 1220
+    connectors = (
+        Connector(points=(right_center(start), left_center(s1))),
+        Connector(points=(right_center(s1), left_center(s21))),
+        Connector(points=(right_center(s21), left_center(s22))),
+        Connector(points=(right_center(s22), left_center(s23))),
+        Connector(points=(right_center(s23), left_center(s31))),
+        Connector(points=(bottom_center(s31), (mid_x(s31), detect_branch_y), (mid_x(s32), detect_branch_y), top_center(s32))),
+        Connector(points=(bottom_center(s31), (mid_x(s31), detect_branch_y), (mid_x(s33), detect_branch_y), top_center(s33))),
+        Connector(points=(bottom_center(s32), (mid_x(s32), 690), top_left_quarter(s41))),
+        Connector(points=(bottom_center(s33), (mid_x(s33), 690), top_right_quarter(s41))),
+        Connector(points=(bottom_center(s41), top_center(s42))),
+        Connector(points=(bottom_center(s42), (mid_x(s42), track_branch_y), (mid_x(s51), track_branch_y), top_center(s51))),
+        Connector(points=(bottom_center(s42), (mid_x(s42), track_branch_y), (mid_x(s52), track_branch_y), top_center(s52))),
+        Connector(points=(bottom_center(s51), (mid_x(s51), 1510), top_left_quarter(s53))),
+        Connector(points=(bottom_center(s52), (mid_x(s52), 1510), top_right_quarter(s53))),
+        Connector(points=(bottom_center(s53), top_center(s61))),
+        Connector(points=(left_center(s61), right_center(s62))),
+        Connector(points=(left_center(s62), right_center(s63))),
+        Connector(points=(left_center(s63), right_center(s71))),
+        Connector(points=(bottom_center(s71), top_center(s72))),
+        Connector(points=(right_center(s72), left_center(s73))),
+        Connector(points=(right_center(s73), left_center(s74))),
+        Connector(points=(right_center(s74), left_center(end))),
+    )
+    return Diagram(
+        "图1_本发明方法总体流程图",
+        nodes,
+        connectors,
+        width=LANDSCAPE_WIDTH,
+        height=LANDSCAPE_HEIGHT,
+    )
 
 
 def build_fig2() -> Diagram:
@@ -460,15 +559,23 @@ def build_fig7() -> Diagram:
 
 
 def build_fig8() -> Diagram:
-    a1 = (160, 200, 1080, 370)
-    a2 = (1400, 200, 2320, 370)
-    b1 = (160, 720, 1080, 890)
-    b2 = (1400, 720, 2320, 890)
-    c = (690, 1140, 1790, 1310)
-    d1 = (160, 1630, 1080, 1800)
-    d2 = (1400, 1630, 2320, 1800)
-    e = (690, 2140, 1790, 2310)
-    f = (690, 2720, 1790, 2890)
+    a1 = (170, 180, 1090, 350)
+    a2 = (1390, 180, 2310, 350)
+    b1 = (170, 700, 1090, 870)
+    b2 = (1390, 700, 2310, 870)
+    c = (690, 1180, 1790, 1350)
+    d1 = (170, 1850, 1090, 2020)
+    d2 = (1390, 1850, 2310, 2020)
+    e = (690, 2500, 1790, 2670)
+    f = (690, 3070, 1790, 3240)
+    spine_x = mid_x(c)
+    left_bus_x = 620
+    right_bus_x = 1860
+    upper_join_y1 = 520
+    upper_join_y2 = 1020
+    upper_merge_y = 1120
+    split_y = 1580
+    merge_y = 2320
     nodes = (
         Node(text="场景视频与航拍数据", bbox=a1),
         Node(text="道路标注与标尺参数", bbox=a2),
@@ -481,19 +588,86 @@ def build_fig8() -> Diagram:
         Node(text="批量场景快速部署", bbox=f),
     )
     connectors = (
-        Connector(points=(bottom_center(a1), (mid_x(a1), 520), (960, 520), (960, 1140))),
-        Connector(points=(bottom_center(a2), (mid_x(a2), 520), (1520, 520), (1520, 1140))),
-        Connector(points=(bottom_center(b1), (mid_x(b1), 1010), (1080, 1010), (1080, 1140))),
-        Connector(points=(bottom_center(b2), (mid_x(b2), 1010), (1400, 1010), (1400, 1140))),
-        Connector(points=((960, 1140), top_left_quarter(c))),
-        Connector(points=((1520, 1140), top_right_quarter(c))),
-        Connector(points=((1080, 1140), top_left_inner(c))),
-        Connector(points=((1400, 1140), top_right_inner(c))),
-        Connector(points=(bottom_center(c), (mid_x(c), 1470), (mid_x(d1), 1470), top_center(d1))),
-        Connector(points=(bottom_center(c), (mid_x(c), 1470), (mid_x(d2), 1470), top_center(d2))),
-        Connector(points=(bottom_center(d1), (mid_x(d1), 1960), (960, 1960), top_left_quarter(e))),
-        Connector(points=(bottom_center(d2), (mid_x(d2), 1960), (1520, 1960), top_right_quarter(e))),
-        Connector(points=(bottom_center(e), top_center(f))),
+        Connector(
+            points=(bottom_center(a1), (mid_x(a1), upper_join_y1), (left_bus_x, upper_join_y1)),
+            arrow=False,
+            line_width=4,
+        ),
+        Connector(
+            points=(bottom_center(a2), (mid_x(a2), upper_join_y1), (right_bus_x, upper_join_y1)),
+            arrow=False,
+            line_width=4,
+        ),
+        Connector(
+            points=(bottom_center(b1), (mid_x(b1), upper_join_y2), (left_bus_x, upper_join_y2)),
+            arrow=False,
+            line_width=4,
+        ),
+        Connector(
+            points=(bottom_center(b2), (mid_x(b2), upper_join_y2), (right_bus_x, upper_join_y2)),
+            arrow=False,
+            line_width=4,
+        ),
+        Connector(
+            points=((left_bus_x, upper_join_y1), (left_bus_x, upper_merge_y), (spine_x, upper_merge_y)),
+            arrow=False,
+            line_width=4,
+        ),
+        Connector(
+            points=((right_bus_x, upper_join_y1), (right_bus_x, upper_merge_y), (spine_x, upper_merge_y)),
+            arrow=False,
+            line_width=4,
+        ),
+        Connector(
+            points=((spine_x, upper_merge_y), top_center(c)),
+            line_width=4,
+            arrow_head_length=30,
+            arrow_head_half_width=14,
+            arrow_gap=12,
+        ),
+        Connector(
+            points=(bottom_center(c), (spine_x, split_y)),
+            arrow=False,
+            line_width=4,
+        ),
+        Connector(
+            points=((spine_x, split_y), (mid_x(d1), split_y), top_center(d1)),
+            line_width=4,
+            arrow_head_length=30,
+            arrow_head_half_width=14,
+            arrow_gap=12,
+        ),
+        Connector(
+            points=((spine_x, split_y), (mid_x(d2), split_y), top_center(d2)),
+            line_width=4,
+            arrow_head_length=30,
+            arrow_head_half_width=14,
+            arrow_gap=12,
+        ),
+        Connector(
+            points=(bottom_center(d1), (mid_x(d1), merge_y), (spine_x, merge_y)),
+            arrow=False,
+            line_width=4,
+        ),
+        Connector(
+            points=(bottom_center(d2), (mid_x(d2), merge_y), (spine_x, merge_y)),
+            arrow=False,
+            line_width=4,
+        ),
+        Connector(
+            points=((spine_x, merge_y), top_center(e)),
+            line_width=4,
+            arrow_head_length=30,
+            arrow_head_half_width=14,
+            arrow_gap=12,
+        ),
+        Connector(
+            points=(bottom_center(e), top_center(f)),
+            line_width=4,
+            arrow_head_length=30,
+            arrow_head_half_width=14,
+            arrow_gap=12,
+        ),
     )
     return Diagram("图8_批量集成部署配置自动生成流程图", nodes, connectors)
 

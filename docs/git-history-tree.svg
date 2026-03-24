@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="1740" viewBox="0 0 1900 1740" role="img" aria-labelledby="title desc">
+  <title id="title">OpenVTER Git History Tree</title>
+  <desc id="desc">A simplified single-branch git history tree for the OpenVTER repository.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7fafc"/>
+      <stop offset="100%" stop-color="#edf2f7"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#94a3b8" flood-opacity="0.25"/>
+    </filter>
+    <style>
+      .title { font: 700 30px 'Microsoft YaHei', 'PingFang SC', sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 16px 'Microsoft YaHei', 'PingFang SC', sans-serif; fill: #475569; }
+      .meta { font: 700 15px Consolas, 'Courier New', monospace; fill: #0f172a; }
+      .summary { font: 400 16px 'Microsoft YaHei', 'PingFang SC', sans-serif; fill: #1e293b; }
+      .small { font: 400 13px 'Microsoft YaHei', 'PingFang SC', sans-serif; fill: #64748b; }
+      .pill { font: 700 13px 'Microsoft YaHei', 'PingFang SC', sans-serif; fill: #ffffff; }
+      .axis { stroke: #334155; stroke-width: 6; stroke-linecap: round; }
+      .node-line { stroke: #94a3b8; stroke-width: 2; }
+      .node { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; }
+      .node-latest { fill: #ecfdf5; stroke: #22c55e; stroke-width: 2; }
+      .dot { fill: #2563eb; stroke: #ffffff; stroke-width: 4; }
+      .dot-latest { fill: #16a34a; stroke: #ffffff; stroke-width: 4; }
+      .tag-latest { fill: #16a34a; }
+      .tag-branch { fill: #2563eb; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1900" height="1740" fill="url(#bg)"/>
+  <text x="72" y="70" class="title">OpenVTER Git 分支树（简化图）</text>
+  <text x="72" y="102" class="subtitle">仓库当前只有一条主线：main。没有看到分叉分支或 merge commit，所以这张图是“单主干分支树”。</text>
+  <text x="72" y="130" class="small">时间方向：上方较新，下方较旧</text>
+
+  <line x1="132" y1="180" x2="132" y2="1610" class="axis"/>
+  <polygon points="132,160 122,184 142,184" fill="#334155"/>
+
+  <rect x="72" y="164" rx="12" ry="12" width="285" height="34" class="tag-latest"/>
+  <text x="92" y="186" class="pill">HEAD / main / github/main / github/HEAD</text>
+
+  <line x1="132" y1="180" x2="182" y2="180" class="node-line"/>
+  <circle cx="132" cy="180" r="13" class="dot-latest"/>
+  <rect x="182" y="145" rx="14" ry="14" width="1590" height="70" class="node-latest" filter="url(#shadow)"/>
+  <text x="210" y="175" class="meta">217b4d1   2026-03-12</text>
+  <text x="210" y="198" class="summary">patent_edit</text>
+
+  <line x1="132" y1="270" x2="182" y2="270" class="node-line"/>
+  <circle cx="132" cy="270" r="11" class="dot"/>
+  <rect x="182" y="238" rx="14" ry="14" width="1590" height="64" class="node" filter="url(#shadow)"/>
+  <text x="210" y="264" class="meta">d9a9a7e   2026-03-05</text>
+  <text x="210" y="286" class="summary">数据标注及人员分配</text>
+
+  <line x1="132" y1="360" x2="182" y2="360" class="node-line"/>
+  <circle cx="132" cy="360" r="11" class="dot"/>
+  <rect x="182" y="320" rx="14" ry="14" width="1590" height="80" class="node" filter="url(#shadow)"/>
+  <text x="210" y="348" class="meta">b18b7aa   2026-01-23</text>
+  <text x="210" y="372" class="summary">导出阶段滤波补充，清理冗余文件，增强车辆类别稳定性</text>
+  <text x="210" y="392" class="small">同时增强检测结果解析能力</text>
+
+  <line x1="132" y1="455" x2="182" y2="455" class="node-line"/>
+  <circle cx="132" cy="455" r="11" class="dot"/>
+  <rect x="182" y="415" rx="14" ry="14" width="1590" height="80" class="node" filter="url(#shadow)"/>
+  <text x="210" y="443" class="meta">10b2ae3   2025-12-31</text>
+  <text x="210" y="467" class="summary">支持多个检测/跟踪模型，优化类别映射与视频处理</text>
+  <text x="210" y="487" class="small">是一次比较明显的能力扩展提交</text>
+
+  <line x1="132" y1="550" x2="182" y2="550" class="node-line"/>
+  <circle cx="132" cy="550" r="11" class="dot"/>
+  <rect x="182" y="510" rx="14" ry="14" width="1590" height="80" class="node" filter="url(#shadow)"/>
+  <text x="210" y="538" class="meta">23a2468   2025-12-15</text>
+  <text x="210" y="562" class="summary">输出结果支持多类目标，补充 pipeline 与模块结构文档</text>
+  <text x="210" y="582" class="small">偏向输出格式与文档整理</text>
+
+  <line x1="132" y1="645" x2="182" y2="645" class="node-line"/>
+  <circle cx="132" cy="645" r="11" class="dot"/>
+  <rect x="182" y="605" rx="14" ry="14" width="1590" height="80" class="node" filter="url(#shadow)"/>
+  <text x="210" y="633" class="meta">0fb1d67   2025-12-10</text>
+  <text x="210" y="657" class="summary">新增视频裁剪时长，按物理长度分类车辆，增强检测解析</text>
+  <text x="210" y="677" class="small">说明当时在持续打磨处理流程与分类逻辑</text>
+
+  <line x1="132" y1="740" x2="182" y2="740" class="node-line"/>
+  <circle cx="132" cy="740" r="11" class="dot"/>
+  <rect x="182" y="708" rx="14" ry="14" width="1590" height="64" class="node" filter="url(#shadow)"/>
+  <text x="210" y="734" class="meta">72e1951   2025-12-01</text>
+  <text x="210" y="756" class="summary">更新背景配置，新增多车道多边形标注</text>
+
+  <line x1="132" y1="830" x2="182" y2="830" class="node-line"/>
+  <circle cx="132" cy="830" r="11" class="dot"/>
+  <rect x="182" y="790" rx="14" ry="14" width="1590" height="80" class="node" filter="url(#shadow)"/>
+  <text x="210" y="818" class="meta">27e9f9b   2025-11-30</text>
+  <text x="210" y="842" class="summary">调整输入输出路径，增强轨迹示例打印与道路配置可视化</text>
+  <text x="210" y="862" class="small">同时删除冗余产物文件</text>
+
+  <line x1="132" y1="925" x2="182" y2="925" class="node-line"/>
+  <circle cx="132" cy="925" r="11" class="dot"/>
+  <rect x="182" y="885" rx="14" ry="14" width="1590" height="80" class="node" filter="url(#shadow)"/>
+  <text x="210" y="913" class="meta">d7dde5c   2025-11-17</text>
+  <text x="210" y="937" class="summary">新增 heading、速度、加速度等物理指标</text>
+  <text x="210" y="957" class="small">轨迹输出开始走向标准化</text>
+
+  <line x1="132" y1="1020" x2="182" y2="1020" class="node-line"/>
+  <circle cx="132" cy="1020" r="11" class="dot"/>
+  <rect x="182" y="980" rx="14" ry="14" width="1590" height="80" class="node" filter="url(#shadow)"/>
+  <text x="210" y="1008" class="meta">49675de   2025-11-12</text>
+  <text x="210" y="1032" class="summary">更新轨迹结构，补充检测结果解析示例，增强日志与可视化</text>
+  <text x="210" y="1052" class="small">与下一个提交一起构成一轮连续迭代</text>
+
+  <line x1="132" y1="1115" x2="182" y2="1115" class="node-line"/>
+  <circle cx="132" cy="1115" r="11" class="dot"/>
+  <rect x="182" y="1075" rx="14" ry="14" width="1590" height="80" class="node" filter="url(#shadow)"/>
+  <text x="210" y="1103" class="meta">2cb488e   2025-11-12</text>
+  <text x="210" y="1127" class="summary">更新视频处理配置，新增视频推理指令，优化日志与可视化</text>
+  <text x="210" y="1147" class="small">说明当日有多次连续提交</text>
+
+  <line x1="132" y1="1210" x2="182" y2="1210" class="node-line"/>
+  <circle cx="132" cy="1210" r="11" class="dot"/>
+  <rect x="182" y="1170" rx="14" ry="14" width="1590" height="80" class="node" filter="url(#shadow)"/>
+  <text x="210" y="1198" class="meta">de4f35e   2025-11-06</text>
+  <text x="210" y="1222" class="summary">归档点：完成稳定 pkl 输出与基础掩膜处理能力</text>
+  <text x="210" y="1242" class="small">提交信息里也明确写了“最基本功能可实现”</text>
+
+  <line x1="132" y1="1305" x2="182" y2="1305" class="node-line"/>
+  <circle cx="132" cy="1305" r="11" class="dot"/>
+  <rect x="182" y="1273" rx="14" ry="14" width="1590" height="64" class="node" filter="url(#shadow)"/>
+  <text x="210" y="1299" class="meta">bc17518   2025-11-05</text>
+  <text x="210" y="1321" class="summary">移除 stabilization 模块冗余测试脚本和原始轨迹数据</text>
+
+  <line x1="132" y1="1395" x2="182" y2="1395" class="node-line"/>
+  <circle cx="132" cy="1395" r="11" class="dot"/>
+  <rect x="182" y="1363" rx="14" ry="14" width="1590" height="64" class="node" filter="url(#shadow)"/>
+  <text x="210" y="1389" class="meta">53f407f   2025-11-05</text>
+  <text x="210" y="1411" class="summary">移除 tracking 模型权重，并更新 .gitignore</text>
+
+  <line x1="132" y1="1485" x2="182" y2="1485" class="node-line"/>
+  <circle cx="132" cy="1485" r="11" class="dot"/>
+  <rect x="182" y="1453" rx="14" ry="14" width="1590" height="64" class="node" filter="url(#shadow)"/>
+  <text x="210" y="1479" class="meta">85a3604   2025-11-05</text>
+  <text x="210" y="1501" class="summary">移除 tracking 大文件</text>
+
+  <line x1="132" y1="1575" x2="182" y2="1575" class="node-line"/>
+  <circle cx="132" cy="1575" r="11" class="dot"/>
+  <rect x="182" y="1543" rx="14" ry="14" width="1590" height="64" class="node" filter="url(#shadow)"/>
+  <text x="210" y="1569" class="meta">a2e2af1   2025-11-05</text>
+  <text x="210" y="1591" class="summary">初始保存（Sure!first save）</text>
+
+  <rect x="72" y="1660" rx="12" ry="12" width="1700" height="44" fill="#e2e8f0"/>
+  <text x="92" y="1688" class="small">解读：这不是“多分支树”，而是一条 main 主线的提交演进图。最新提交在最上方，最早提交在最下方。</text>
+</svg>

@@ -1,0 +1,6 @@
+name: DMS
+channels:
+  - defaults
+dependencies:
+  - python=3.9
+prefix: D:\Anaconda\envs\DMS

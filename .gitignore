@@ -156,3 +156,8 @@ assets/video/
 assets/videos/
 data1/UAV_Videos/
 datasets/videos/
+data/
+tools/wheels-cu113/
+tph-yolov5/runs/
+tph-yolov5/.vscode/
+tph-yolov5/weights/

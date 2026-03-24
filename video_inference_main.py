@@ -8,6 +8,13 @@
 @Software: PyCharm
 @desc: 
 '''
+import os
+
+# WSL + newer torch/cudnn combinations may repeatedly fail cuDNN v8 plan
+# selection on legacy models and then fall back anyway. Prefer the legacy
+# cuDNN path unless the user explicitly overrides this in the environment.
+os.environ.setdefault("TORCH_CUDNN_V8_API_DISABLED", "1")
+
 from video_inference.video_process import DroneVideoProcess
 from video_inference.video_stabilization import DroneVideoStab
 from video_inference.video_process_multiprocessing import run
@@ -46,5 +53,4 @@ if __name__ == '__main__':
             v = DroneVideoProcess(args.config_json)
             # v.process_img()
             v.process_video()
-
 

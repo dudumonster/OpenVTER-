@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fused Rotated Detector Architecture</title>
+  <style>
+    :root {
+      --bg: #f6f8fc;
+      --ink: #1f2937;
+      --muted: #667085;
+      --line: #a8b3c7;
+      --panel: #ffffff;
+      --backbone: #eef4ff;
+      --neck: #f5f0ff;
+      --head: #fff5ee;
+      --conv: #ffd9ba;
+      --fusion: #e9c9f3;
+      --concat: #f5c8d5;
+      --up: #c7edf0;
+      --fcm: #f6efaf;
+      --mkp: #f5d4b5;
+      --sppf: #d9f1f1;
+      --branch: #dce9bf;
+      --out: #ebe6d7;
+      --accent: #4f46e5;
+      --accent2: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(180deg, #fbfcff 0%, var(--bg) 100%);
+      color: var(--ink);
+    }
+    .page {
+      padding: 20px 24px 28px;
+    }
+    .header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    .title h1 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.15;
+    }
+    .title p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.5;
+      max-width: 980px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .toolbar button {
+      border: 1px solid #cfd6e4;
+      background: #fff;
+      border-radius: 10px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .toolbar .hint {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      margin-bottom: 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .swatch {
+      width: 22px;
+      height: 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(0,0,0,0.08);
+    }
+    .canvas-wrap {
+      background: #fff;
+      border: 1px solid #d9e0ed;
+      border-radius: 20px;
+      padding: 14px;
+      overflow: auto;
+      box-shadow: 0 16px 40px rgba(17, 24, 39, 0.06);
+    }
+    .zoom-layer {
+      transform-origin: top left;
+      transition: transform 180ms ease;
+      width: max-content;
+    }
+    svg {
+      display: block;
+      width: 1760px;
+      height: 1020px;
+      max-width: none;
+    }
+    .panel-title {
+      font-weight: 700;
+      font-size: 20px;
+      fill: var(--ink);
+    }
+    .small-note {
+      font-size: 13px;
+      fill: var(--muted);
+    }
+    .node {
+      stroke: rgba(60,72,92,0.12);
+      stroke-width: 1.2;
+      rx: 12;
+      ry: 12;
+    }
+    .label {
+      font-size: 16px;
+      font-weight: 600;
+      fill: var(--ink);
+      text-anchor: middle;
+      dominant-baseline: middle;
+    }
+    .index {
+      font-size: 14px;
+      fill: var(--muted);
+      text-anchor: end;
+      dominant-baseline: middle;
+    }
+    .path {
+      fill: none;
+      stroke: #344054;
+      stroke-width: 2.2;
+      marker-end: url(#arrow);
+    }
+    .guide {
+      fill: none;
+      stroke: var(--accent);
+      stroke-width: 2.2;
+      stroke-dasharray: 8 8;
+      marker-end: url(#arrow-accent);
+    }
+    .callout-title {
+      font-size: 18px;
+      font-weight: 700;
+      fill: var(--ink);
+    }
+    .callout-text {
+      font-size: 14px;
+      fill: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div class="title">
+        <h1>??????????</h1>
+        <p>??????????????????????????????????????????????? <strong>Input ? Backbone ? Neck/FPN ? Rotated Decoupled Head</strong> ???????? <strong>FCM</strong> ? <strong>MKP</strong> ???????????????????????????????</p>
+      </div>
+      <div class="toolbar">
+        <button onclick="zoom(1.12)">??</button>
+        <button onclick="zoom(0.9)">??</button>
+        <button onclick="resetZoom()">??</button>
+        <div class="hint">??????? 110% - 150% ??</div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span><i class="swatch" style="background: var(--fcm);"></i> FCM ????</span>
+      <span><i class="swatch" style="background: var(--mkp);"></i> MKP ????</span>
+      <span><i class="swatch" style="background: var(--conv);"></i> Conv/CBS ??????</span>
+      <span><i class="swatch" style="background: var(--fusion);"></i> ??????C2f/C3??</span>
+      <span><i class="swatch" style="background: var(--branch);"></i> Head ?????</span>
+    </div>
+
+    <div class="canvas-wrap">
+      <div id="zoomLayer" class="zoom-layer">
+        <svg viewBox="0 0 1760 1020" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L10,5 L0,10 z" fill="#344054"></path>
+            </marker>
+            <marker id="arrow-accent" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L10,5 L0,10 z" fill="#4f46e5"></path>
+            </marker>
+          </defs>
+
+          <rect x="18" y="18" width="1724" height="984" rx="18" fill="#fcfdff" stroke="#e0e6f0" />
+
+          <rect x="40" y="82" width="990" height="870" rx="24" fill="#fbfcff" stroke="#d8deea"/>
+          <rect x="60" y="120" width="185" height="760" rx="22" fill="var(--backbone)" stroke="#cdd8eb"/>
+          <rect x="300" y="150" width="390" height="600" rx="22" fill="var(--neck)" stroke="#d9d3ea"/>
+          <rect x="740" y="150" width="260" height="600" rx="22" fill="var(--head)" stroke="#ead3c6"/>
+
+          <text x="152" y="110" class="panel-title" text-anchor="middle">Backbone</text>
+          <text x="495" y="140" class="panel-title" text-anchor="middle">Neck / FPN</text>
+          <text x="870" y="140" class="panel-title" text-anchor="middle">Rotated Decoupled Head</text>
+
+          <rect x="1090" y="82" width="632" height="430" rx="22" fill="#fff6d8" stroke="#ebd79a"/>
+          <rect x="1090" y="540" width="632" height="330" rx="22" fill="#ffebdf" stroke="#e9c8ad"/>
+          <text x="1406" y="112" class="panel-title" text-anchor="middle">Feature Complementary Mapping Module (FCM)</text>
+          <text x="1406" y="570" class="panel-title" text-anchor="middle">Multi-Kernel Perception Unit (MKP)</text>
+
+          <g>
+            <rect x="88" y="892" width="54" height="54" fill="#5ea3ff" opacity="0.95"/>
+            <rect x="99" y="881" width="54" height="54" fill="#4fd1c5" opacity="0.95"/>
+            <rect x="110" y="870" width="54" height="54" fill="#ff6464" opacity="0.95"/>
+            <text x="138" y="974" class="small-note" text-anchor="middle">Input image</text>
+            <path d="M137 870 L137 850" class="path"/>
+          </g>
+
+          <g>
+            <text x="85" y="832" class="index">10</text>
+            <rect x="100" y="814" width="86" height="36" class="node" fill="var(--sppf)"/>
+            <text x="143" y="832" class="label">SPPF</text>
+
+            <text x="85" y="764" class="index">9</text>
+            <rect x="100" y="746" width="86" height="36" class="node" fill="var(--module)"/>
+            <text x="143" y="764" class="label">Conv</text>
+
+            <text x="85" y="696" class="index">8</text>
+            <rect x="100" y="678" width="86" height="36" class="node" fill="var(--fcm)"/>
+            <text x="143" y="696" class="label">FCM</text>
+
+            <text x="85" y="628" class="index">7</text>
+            <rect x="100" y="610" width="86" height="36" class="node" fill="var(--mkp)"/>
+            <text x="143" y="628" class="label">MKP</text>
+
+            <text x="85" y="560" class="index">6</text>
+            <rect x="100" y="542" width="86" height="36" class="node" fill="var(--fcm)"/>
+            <text x="143" y="560" class="label">FCM</text>
+
+            <text x="85" y="492" class="index">5</text>
+            <rect x="100" y="474" width="86" height="36" class="node" fill="var(--module)"/>
+            <text x="143" y="492" class="label">Conv</text>
+
+            <text x="85" y="424" class="index">4</text>
+            <rect x="100" y="406" width="86" height="36" class="node" fill="var(--fcm)"/>
+            <text x="143" y="424" class="label">FCM</text>
+
+            <text x="85" y="356" class="index">3</text>
+            <rect x="100" y="338" width="86" height="36" class="node" fill="var(--module)"/>
+            <text x="143" y="356" class="label">Conv</text>
+
+            <text x="85" y="288" class="index">2</text>
+            <rect x="100" y="270" width="86" height="36" class="node" fill="var(--fcm)"/>
+            <text x="143" y="288" class="label">FCM</text>
+
+            <text x="85" y="220" class="index">1</text>
+            <rect x="100" y="202" width="86" height="36" class="node" fill="var(--conv)"/>
+            <text x="143" y="220" class="label">CBS</text>
+
+            <text x="85" y="152" class="index">0</text>
+            <rect x="100" y="134" width="86" height="36" class="node" fill="var(--conv)"/>
+            <text x="143" y="152" class="label">CBS</text>
+
+            <path d="M143 814 L143 782" class="path"/>
+            <path d="M143 746 L143 714" class="path"/>
+            <path d="M143 678 L143 646" class="path"/>
+            <path d="M143 610 L143 578" class="path"/>
+            <path d="M143 542 L143 510" class="path"/>
+            <path d="M143 474 L143 442" class="path"/>
+            <path d="M143 406 L143 374" class="path"/>
+            <path d="M143 338 L143 306" class="path"/>
+            <path d="M143 270 L143 238" class="path"/>
+            <path d="M143 202 L143 170" class="path"/>
+          </g>
+
+          <g>
+            <text x="332" y="660" class="index">11</text>
+            <rect x="350" y="642" width="110" height="38" class="node" fill="var(--fusion)"/>
+            <text x="405" y="661" class="label">C2f</text>
+
+            <text x="332" y="584" class="index">12</text>
+            <rect x="350" y="566" width="110" height="38" class="node" fill="var(--concat)"/>
+            <text x="405" y="585" class="label">Concat</text>
+
+            <text x="332" y="508" class="index">13</text>
+            <rect x="350" y="490" width="110" height="38" class="node" fill="var(--up)"/>
+            <text x="405" y="509" class="label">Upsample</text>
+
+            <text x="332" y="394" class="index">14</text>
+            <rect x="350" y="376" width="110" height="38" class="node" fill="var(--fusion)"/>
+            <text x="405" y="395" class="label">C2f</text>
+
+            <text x="332" y="318" class="index">15</text>
+            <rect x="350" y="300" width="110" height="38" class="node" fill="var(--concat)"/>
+            <text x="405" y="319" class="label">Concat</text>
+
+            <text x="332" y="242" class="index">16</text>
+            <rect x="350" y="224" width="110" height="38" class="node" fill="var(--up)"/>
+            <text x="405" y="243" class="label">UP</text>
+
+            <text x="566" y="660" class="index">22</text>
+            <rect x="585" y="642" width="110" height="38" class="node" fill="var(--fusion)"/>
+            <text x="640" y="661" class="label">C2f</text>
+
+            <text x="566" y="584" class="index">21</text>
+            <rect x="585" y="566" width="110" height="38" class="node" fill="var(--concat)"/>
+            <text x="640" y="585" class="label">Concat</text>
+
+            <text x="566" y="508" class="index">20</text>
+            <rect x="585" y="490" width="110" height="38" class="node" fill="var(--conv)"/>
+            <text x="640" y="509" class="label">Conv</text>
+
+            <text x="566" y="394" class="index">19</text>
+            <rect x="585" y="376" width="110" height="38" class="node" fill="var(--fusion)"/>
+            <text x="640" y="395" class="label">C2f</text>
+
+            <text x="566" y="318" class="index">18</text>
+            <rect x="585" y="300" width="110" height="38" class="node" fill="var(--concat)"/>
+            <text x="640" y="319" class="label">Concat</text>
+
+            <text x="566" y="242" class="index">17</text>
+            <rect x="585" y="224" width="110" height="38" class="node" fill="var(--conv)"/>
+            <text x="640" y="243" class="label">Conv</text>
+
+            <path d="M405 642 L405 604" class="path"/>
+            <path d="M405 566 L405 528" class="path"/>
+            <path d="M405 490 L405 414" class="path"/>
+            <path d="M405 376 L405 338" class="path"/>
+            <path d="M405 300 L405 262" class="path"/>
+
+            <path d="M640 262 L640 300" class="path"/>
+            <path d="M640 338 L640 376" class="path"/>
+            <path d="M640 414 L640 490" class="path"/>
+            <path d="M640 528 L640 566" class="path"/>
+            <path d="M640 604 L640 642" class="path"/>
+
+            <path d="M186 424 L350 319" class="path"/>
+            <path d="M186 560 L350 585" class="path"/>
+            <path d="M186 696 L585 661" class="path"/>
+            <path d="M186 288 L350 243" class="path"/>
+            <path d="M460 661 L585 661" class="path"/>
+            <path d="M460 395 L585 319" class="path"/>
+            <path d="M460 243 L760 243" class="path"/>
+            <path d="M695 319 L760 395" class="path"/>
+            <path d="M695 661 L760 661" class="path"/>
+          </g>
+
+          <g>
+            <text x="760" y="222" class="small-note">P5</text>
+            <text x="760" y="392" class="small-note">P4</text>
+            <text x="760" y="658" class="small-note">P3</text>
+
+            <g>
+              <rect x="785" y="200" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="875" y="200" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="965" y="200" width="86" height="34" class="node" fill="var(--out)"/>
+              <text x="821" y="217" class="label">CBS</text>
+              <text x="911" y="217" class="label">CBS</text>
+              <text x="1008" y="217" class="label">Conv2d</text>
+              <path d="M760 217 L785 217" class="path"/>
+              <path d="M857 217 L875 217" class="path"/>
+              <path d="M947 217 L965 217" class="path"/>
+              <text x="1068" y="220" class="small-note">Cls</text>
+
+              <rect x="785" y="255" width="72" height="34" class="node" fill="var(--branch)"/>
+              <rect x="875" y="255" width="72" height="34" class="node" fill="var(--branch)"/>
+              <rect x="965" y="255" width="86" height="34" class="node" fill="var(--out)"/>
+              <text x="821" y="272" class="label">DSC</text>
+              <text x="911" y="272" class="label">DSC</text>
+              <text x="1008" y="272" class="label">Conv2d</text>
+              <path d="M760 272 L785 272" class="path"/>
+              <path d="M857 272 L875 272" class="path"/>
+              <path d="M947 272 L965 272" class="path"/>
+              <text x="1068" y="275" class="small-note">Obj / HBB</text>
+
+              <rect x="785" y="310" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="875" y="310" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="965" y="310" width="86" height="34" class="node" fill="var(--out)"/>
+              <text x="821" y="327" class="label">CBS</text>
+              <text x="911" y="327" class="label">CBS</text>
+              <text x="1008" y="327" class="label">Conv2d</text>
+              <path d="M760 327 L785 327" class="path"/>
+              <path d="M857 327 L875 327" class="path"/>
+              <path d="M947 327 L965 327" class="path"/>
+              <text x="1068" y="330" class="small-note">BBA / Ori</text>
+            </g>
+
+            <g>
+              <rect x="785" y="470" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="875" y="470" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="965" y="470" width="86" height="34" class="node" fill="var(--out)"/>
+              <text x="821" y="487" class="label">CBS</text>
+              <text x="911" y="487" class="label">CBS</text>
+              <text x="1008" y="487" class="label">Conv2d</text>
+              <path d="M760 487 L785 487" class="path"/>
+              <path d="M857 487 L875 487" class="path"/>
+              <path d="M947 487 L965 487" class="path"/>
+              <text x="1068" y="490" class="small-note">Cls</text>
+
+              <rect x="785" y="525" width="72" height="34" class="node" fill="var(--branch)"/>
+              <rect x="875" y="525" width="72" height="34" class="node" fill="var(--branch)"/>
+              <rect x="965" y="525" width="86" height="34" class="node" fill="var(--out)"/>
+              <text x="821" y="542" class="label">DSC</text>
+              <text x="911" y="542" class="label">DSC</text>
+              <text x="1008" y="542" class="label">Conv2d</text>
+              <path d="M760 542 L785 542" class="path"/>
+              <path d="M857 542 L875 542" class="path"/>
+              <path d="M947 542 L965 542" class="path"/>
+              <text x="1068" y="545" class="small-note">Obj / HBB</text>
+
+              <rect x="785" y="580" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="875" y="580" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="965" y="580" width="86" height="34" class="node" fill="var(--out)"/>
+              <text x="821" y="597" class="label">CBS</text>
+              <text x="911" y="597" class="label">CBS</text>
+              <text x="1008" y="597" class="label">Conv2d</text>
+              <path d="M760 597 L785 597" class="path"/>
+              <path d="M857 597 L875 597" class="path"/>
+              <path d="M947 597 L965 597" class="path"/>
+              <text x="1068" y="600" class="small-note">BBA / Ori</text>
+            </g>
+
+            <g>
+              <rect x="785" y="705" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="875" y="705" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="965" y="705" width="86" height="34" class="node" fill="var(--out)"/>
+              <text x="821" y="722" class="label">CBS</text>
+              <text x="911" y="722" class="label">CBS</text>
+              <text x="1008" y="722" class="label">Conv2d</text>
+              <path d="M760 722 L785 722" class="path"/>
+              <path d="M857 722 L875 722" class="path"/>
+              <path d="M947 722 L965 722" class="path"/>
+              <text x="1068" y="725" class="small-note">Cls</text>
+
+              <rect x="785" y="760" width="72" height="34" class="node" fill="var(--branch)"/>
+              <rect x="875" y="760" width="72" height="34" class="node" fill="var(--branch)"/>
+              <rect x="965" y="760" width="86" height="34" class="node" fill="var(--out)"/>
+              <text x="821" y="777" class="label">DSC</text>
+              <text x="911" y="777" class="label">DSC</text>
+              <text x="1008" y="777" class="label">Conv2d</text>
+              <path d="M760 777 L785 777" class="path"/>
+              <path d="M857 777 L875 777" class="path"/>
+              <path d="M947 777 L965 777" class="path"/>
+              <text x="1068" y="780" class="small-note">Obj / HBB</text>
+
+              <rect x="785" y="815" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="875" y="815" width="72" height="34" class="node" fill="var(--conv)"/>
+              <rect x="965" y="815" width="86" height="34" class="node" fill="var(--out)"/>
+              <text x="821" y="832" class="label">CBS</text>
+              <text x="911" y="832" class="label">CBS</text>
+              <text x="1008" y="832" class="label">Conv2d</text>
+              <path d="M760 832 L785 832" class="path"/>
+              <path d="M857 832 L875 832" class="path"/>
+              <path d="M947 832 L965 832" class="path"/>
+              <text x="1068" y="835" class="small-note">BBA / Ori</text>
+            </g>
+          </g>
+
+          <g>
+            <rect x="1150" y="250" width="110" height="60" class="node" fill="#ffd6b8"/>
+            <text x="1205" y="280" class="label">Input</text>
+            <text x="1205" y="300" class="label">Features</text>
+            <text x="1210" y="338" class="callout-text">Split</text>
+
+            <rect x="1335" y="196" width="128" height="62" class="node" fill="#f8f5d1"/>
+            <text x="1399" y="225" class="label">Position</text>
+            <text x="1399" y="246" class="label">Embedding</text>
+
+            <rect x="1335" y="360" width="128" height="62" class="node" fill="#dff2cf"/>
+            <text x="1399" y="389" class="label">Semantic</text>
+            <text x="1399" y="410" class="label">Enrichment</text>
+
+            <rect x="1510" y="260" width="140" height="50" class="node" fill="#ffddb9"/>
+            <text x="1580" y="285" class="label">Channel Guidance</text>
+
+            <rect x="1668" y="260" width="120" height="50" class="node" fill="#ffe4c7"/>
+            <text x="1728" y="285" class="label">Spatial Agg.</text>
+
+            <rect x="1510" y="378" width="170" height="50" class="node" fill="#f1c488"/>
+            <text x="1595" y="403" class="label">Complementary Mapping</text>
+
+            <circle cx="1708" cy="335" r="15" fill="#fff" stroke="#667085" stroke-width="2"></circle>
+            <text x="1708" y="339" class="label" style="font-size:18px">+</text>
+
+            <path d="M1260 280 L1335 227" class="path"/>
+            <path d="M1260 280 L1335 391" class="path"/>
+            <path d="M1463 227 L1510 285" class="path"/>
+            <path d="M1463 391 L1510 285" class="path"/>
+            <path d="M1650 285 L1668 285" class="path"/>
+            <path d="M1595 310 L1595 378" class="path"/>
+            <path d="M1680 403 L1690 403 L1690 350" class="path"/>
+            <path d="M1788 285 L1808 285 L1808 335 L1723 335" class="path"/>
+            <path d="M1723 335 L1765 335" class="path"/>
+            <g>
+              <rect x="1792" y="300" width="16" height="72" rx="4" fill="#d9842b"></rect>
+              <rect x="1808" y="296" width="16" height="72" rx="4" fill="#d9842b"></rect>
+              <rect x="1824" y="292" width="16" height="72" rx="4" fill="#d9842b"></rect>
+              <rect x="1840" y="288" width="16" height="72" rx="4" fill="#d9842b"></rect>
+            </g>
+            <text x="1818" y="388" class="callout-text" text-anchor="middle">Output features</text>
+
+            <text x="1588" y="176" class="callout-text">S : Sigmoid</text>
+            <text x="1588" y="198" class="callout-text">AvgPool : Adaptive average pooling</text>
+            <text x="1588" y="220" class="callout-text">PWConv : Pointwise convolution</text>
+            <text x="1500" y="245" class="callout-text">w1</text>
+            <text x="1648" y="365" class="callout-text">w2</text>
+          </g>
+
+          <g>
+            <text x="1160" y="720" class="callout-title">X</text>
+            <rect x="1235" y="680" width="74" height="130" class="node" fill="#dfe8fb" stroke="#9fb2d8"></rect>
+            <rect x="1338" y="680" width="74" height="130" class="node" fill="#dfe8fb" stroke="#9fb2d8"></rect>
+            <rect x="1441" y="680" width="74" height="130" class="node" fill="#dfe8fb" stroke="#9fb2d8"></rect>
+            <rect x="1544" y="680" width="74" height="130" class="node" fill="#dfe8fb" stroke="#9fb2d8"></rect>
+            <rect x="1647" y="680" width="74" height="130" class="node" fill="#dfe8fb" stroke="#9fb2d8"></rect>
+            <rect x="1750" y="680" width="74" height="130" class="node" fill="#dfe8fb" stroke="#9fb2d8"></rect>
+            <text x="1272" y="745" class="label">DWConv</text>
+            <text x="1375" y="745" class="label">PWConv</text>
+            <text x="1478" y="745" class="label">DWConv</text>
+            <text x="1581" y="745" class="label">PWConv</text>
+            <text x="1684" y="745" class="label">DWConv</text>
+            <text x="1787" y="745" class="label">PWConv</text>
+            <path d="M1185 745 L1235 745" class="path"/>
+            <path d="M1309 745 L1338 745" class="path"/>
+            <path d="M1412 745 L1441 745" class="path"/>
+            <path d="M1515 745 L1544 745" class="path"/>
+            <path d="M1618 745 L1647 745" class="path"/>
+            <path d="M1721 745 L1750 745" class="path"/>
+            <path d="M1824 745 L1864 745" class="path"/>
+            <text x="1874" y="720" class="callout-title">X?</text>
+
+            <rect x="1252" y="860" width="56" height="56" rx="8" fill="#87aefb"></rect>
+            <rect x="1458" y="860" width="56" height="56" rx="8" fill="#6cc7d6"></rect>
+            <rect x="1664" y="860" width="56" height="56" rx="8" fill="#ffb86f"></rect>
+            <text x="1280" y="940" class="callout-text" text-anchor="middle">k=3</text>
+            <text x="1486" y="940" class="callout-text" text-anchor="middle">k=5</text>
+            <text x="1692" y="940" class="callout-text" text-anchor="middle">k=7</text>
+          </g>
+
+          <text x="210" y="600" class="callout-text" fill="var(--accent)">FCM plug-ins</text>
+          <text x="210" y="548" class="callout-text" fill="var(--accent)">MKP insertion</text>
+          <path d="M190 592 C 430 560, 720 320, 1085 260" class="guide"/>
+          <path d="M190 542 C 440 600, 760 750, 1085 760" class="guide"/>
+
+          <text x="880" y="986" class="small-note" text-anchor="middle">??????????????????????????????????????FCM/MKP ???????????</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let scale = 1;
+    const zoomLayer = document.getElementById('zoomLayer');
+    function applyScale() {
+      zoomLayer.style.transform = `scale(${scale})`;
+    }
+    function zoom(factor) {
+      scale = Math.max(0.6, Math.min(2.4, scale * factor));
+      applyScale();
+    }
+    function resetZoom() {
+      scale = 1;
+      applyScale();
+    }
+    window.zoom = zoom;
+    window.resetZoom = resetZoom;
+    applyScale();
+  </script>
+</body>
+</html>

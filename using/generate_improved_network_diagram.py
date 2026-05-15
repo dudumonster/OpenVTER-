@@ -1,8 +1,10 @@
+import os
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import math
 
-OUTDIR = Path('output/figures')
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+OUTDIR = PROJECT_ROOT / 'output' / 'figures'
 OUTDIR.mkdir(parents=True, exist_ok=True)
 PNG = OUTDIR / 'improved_rotated_detector_architecture.png'
 SVG = OUTDIR / 'improved_rotated_detector_architecture.svg'
@@ -10,12 +12,35 @@ SVG = OUTDIR / 'improved_rotated_detector_architecture.svg'
 W, H = 1900, 1150
 img = Image.new('RGB', (W, H), 'white')
 draw = ImageDraw.Draw(img)
-FONT = r'C:\Windows\Fonts\arial.ttf'
-FONT_B = r'C:\Windows\Fonts\arialbd.ttf'
+FONT_CANDIDATES = [
+    Path(os.getenv("WINDIR", "")) / "Fonts" / "arial.ttf",
+    Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+    Path("/System/Library/Fonts/Supplemental/Helvetica.ttc"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+]
+FONT_B_CANDIDATES = [
+    Path(os.getenv("WINDIR", "")) / "Fonts" / "arialbd.ttf",
+    Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+    Path("/System/Library/Fonts/Supplemental/Helvetica.ttc"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+]
+
+
+def _pick_font(candidates):
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return str(candidate)
+    return None
+
+
+FONT = _pick_font(FONT_CANDIDATES)
+FONT_B = _pick_font(FONT_B_CANDIDATES)
 
 def font(size, bold=False):
     path = FONT_B if bold else FONT
-    return ImageFont.truetype(path, size)
+    if path is not None:
+        return ImageFont.truetype(path, size)
+    return ImageFont.load_default()
 
 C = {
     'text': '#1f2633',

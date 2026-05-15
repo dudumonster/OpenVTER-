@@ -20,6 +20,11 @@ def get_all_video_info(video_file_ls):
     old_height = 0
     old_fps = 0
     for video_index, video_file in enumerate(video_file_ls):
+        if not isinstance(video_file, (str, os.PathLike)):
+            raise TypeError(
+                f"video_file_ls[{video_index}] must be a path string, "
+                f"but got {type(video_file).__name__}: {video_file!r}"
+            )
         cap = cv2.VideoCapture(video_file)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

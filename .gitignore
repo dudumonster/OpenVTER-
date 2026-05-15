@@ -109,6 +109,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.venv/
 
 # Spyder project settings
 .spyderproject
@@ -136,6 +137,9 @@ dmypy.json
 .pyre/
 
 .idea/
+.vscode/
+Thumbs.db
+.DS_Store
 
 # ===================== Project-specific ignores =====================
 
@@ -157,6 +161,20 @@ assets/videos/
 data1/UAV_Videos/
 datasets/videos/
 data/
+output/
+outputs/
+results/
+logs/
+checkpoints/
+tools/*/output/
+trajectories.csv
+trajectories.xlsx
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+.streamlit/
 tools/wheels-cu113/
 tph-yolov5/runs/
 tph-yolov5/.vscode/

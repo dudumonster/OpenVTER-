@@ -135,7 +135,10 @@ class DroneVideoProcess:
 
     def _get_video_file(self,config_dict):
         if 'video_file' in config_dict:
-            return [config_dict.get('video_file')]
+            video_file = config_dict.get('video_file')
+            if isinstance(video_file, list):
+                return video_file
+            return [video_file]
         elif 'first_video_name' in config_dict and 'video_num' in config_dict:
             video_folder = config_dict.get('video_folder')
             first_video_name = config_dict.get('first_video_name')

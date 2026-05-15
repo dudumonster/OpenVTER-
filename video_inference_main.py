@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO,
 
 def parse_args():
     parser = argparse.ArgumentParser(description='OpenVTER Implementation')
-    parser.add_argument("-c",'--config_json', type=str, help='config')
+    parser.add_argument("-c", "--config_json", "--config", dest="config_json", type=str, help='config')
     parser.add_argument("-s","--step",
                         type=int,
                         help="1:stabilize 2:detect video without stabilization 3: detect and tracking video")
@@ -39,18 +39,32 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-if __name__ == '__main__':
-    args = parse_args()
-    if args.step == 1:
-        video_stab = DroneVideoStab(args.config_json)
-        video_stab.process(step=args.config_parameter)
-    elif args.step == 2:
-        run_det(args.config_json)
-    elif args.step == 3:
-        if args.multiprocessing:
-            run(args.config_json)
+def run_pipeline(config_path, step, config_parameter=None, multiprocessing=False):
+    if step == 1:
+        video_stab = DroneVideoStab(config_path)
+        video_stab.process(step=config_parameter)
+    elif step == 2:
+        run_det(config_path)
+    elif step == 3:
+        if multiprocessing:
+            run(config_path)
         else:
-            v = DroneVideoProcess(args.config_json)
-            # v.process_img()
+            v = DroneVideoProcess(config_path)
             v.process_video()
+    else:
+        raise ValueError(f"Unsupported step: {step}")
+
+
+def main():
+    args = parse_args()
+    run_pipeline(
+        config_path=args.config_json,
+        step=args.step,
+        config_parameter=args.config_parameter,
+        multiprocessing=args.multiprocessing,
+    )
+
+
+if __name__ == '__main__':
+    main()
 

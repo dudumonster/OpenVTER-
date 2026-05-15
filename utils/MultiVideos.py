@@ -8,10 +8,6 @@
 @Software: PyCharm
 @desc: 多视频类,将多个视频抽象为一个视频,用于多视频拼接
 '''
-import sys
-root_path = "/home/xinkaiji/Workspace/CV/openVTER_V2"
-sys.path.append(root_path)
-
 import os
 import cv2
 import json
@@ -381,21 +377,8 @@ class MultiVideos:
             sub_video.release()
 
 if __name__ == '__main__':
-
-    main_json = '../config/mixed_roads/multi_20220617_A3A4_F1.json'
-
-    multi_video = MultiVideos(main_json)
-    print(multi_video)
-    print('x_position:',multi_video.split_x_position)
-    ret,stitch_img,sub_frame_index, sub_unix_time = multi_video.get_align_frame()
-    video_writer,output_width, output_height = multi_video.init_video_write('/home/xinkaiji/temp_videos/align',multi_video.multi_video_fps)
-    try:
-        while ret:
-            ret,stitch_img,main_frame_index, main_unix_time = multi_video.get_align_frame(add_frame_index=False)
-            if not ret:
-                break
-            stitch_img = cv2.resize(stitch_img,(output_width,output_height))
-            video_writer.write(stitch_img)
-    finally:
-        video_writer.release()
+    raise SystemExit(
+        "MultiVideos is a library module. "
+        "Please invoke it from the project pipeline or add a dedicated CLI wrapper."
+    )
 

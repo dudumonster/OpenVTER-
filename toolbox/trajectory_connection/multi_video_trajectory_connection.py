@@ -13,6 +13,7 @@
 import os
 import pickle
 import json
+from pathlib import Path
 import cv2
 import shutil
 import numpy as np
@@ -26,6 +27,7 @@ from utils.VideoTool import get_transformer_matrix
 from toolbox.module.DrivingLine import DrivingLineList
 
 INF = 10**5
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def get_tppkl(video_json_path):
     '''
     加载tppkl文件
@@ -89,14 +91,10 @@ def _get_transformer_pts(road_config_json_file, main_name):
         label = 'stitch_'
     else:
         label = 'stitch_%s' % main_name
-    if not os.path.isabs(road_config_json_file):
-        print(road_config_json_file)
-        if road_config_json_file.startswith('.'):
-            road_config_json_file = road_config_json_file[1:]
-            print(road_config_json_file)
-        road_config_json_file = root_path + road_config_json_file
-        print(road_config_json_file)
-    with open(road_config_json_file, 'r', encoding='utf-8') as f:
+    road_config_path = Path(os.path.expanduser(road_config_json_file))
+    if not road_config_path.is_absolute():
+        road_config_path = (PROJECT_ROOT / road_config_path).resolve()
+    with open(road_config_path, 'r', encoding='utf-8') as f:
         road_config = json.load(f)
     for shape in road_config['shapes']:
         if shape['label'].startswith(label):  #

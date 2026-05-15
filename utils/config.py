@@ -119,7 +119,10 @@ class Config:
         :return:
         '''
         if 'video_file' in config_dict:
-            return [config_dict.get('video_file')]
+            video_file = config_dict.get('video_file')
+            if isinstance(video_file, list):
+                return video_file
+            return [video_file]
         elif 'first_video_name' in config_dict and 'video_num' in config_dict:
             video_folder = config_dict.get('video_folder')
             first_video_name = config_dict.get('first_video_name')
@@ -552,35 +555,7 @@ def visualize_config(config_json, img_path=None):
 #         print(multi_video)
 
 if __name__ == '__main__':
-    # filename = '/data2/xinkaiji/mixedroad_process/20220617/merge_config/merge_F1/20220617_0700_A1_F1_374_1.json'
-    # res = RoadConfig.fromfile(filename)
-    # img = cv2.imread("/data2/xinkaiji/mixedroad_process/20220617/road_config/20220617_0700_A1_F1_374_1.jpg")
-    # det_mask = res["det_mask"]
-    # axis_image = res["axis_image"]
-    # img = cv2.bitwise_and(img, det_mask)
-    #
-    # img = cv2.add(img,axis_image)
-    # cv2.imwrite("/home/xinkaiji/temp_videos/20220617_0700_A1_F1_374_1_mask.jpg",img)
-
-    road_config_file = '/data3/DJIData/HurongHighway/20220617/B1-B2/M-20220617_0700_B2_F1_372_1-S-20220617_0700_B1_F1_370_1/first_frame_M-20220617_0700_B2_F1_372_1-S-20220617_0700_B1_F1_370_1.json'
-    img_path = '/data3/DJIData/HurongHighway/20220617/B1-B2/M-20220617_0700_B2_F1_372_1-S-20220617_0700_B1_F1_370_1/first_frame_M-20220617_0700_B2_F1_372_1-S-20220617_0700_B1_F1_370_1.jpg'
-
-
-    img = visualize_config(road_config_file, img_path)
-    folder,file_path = os.path.split(img_path)
-    img_file_path ='labeled_'+file_path
-    output_path = os.path.join(folder,img_file_path)
-    cv2.imwrite(output_path, img)
-
-    # y = [50,60]
-    # x1 = [10,10]
-    # x2 = [100,0]
-    # print(getFootPoint(y,x1,x2))
-
-    # p1 = [10,10]
-    # p2 = [11,20]
-    # p3 = [21,30]
-    # p4 = [20,40]
-    # print(findIntersection(p1, p2, p3, p4))
-    # get_multi_videos('../config/yingtianstreet/0708/multi_20220708_F1.yaml')
-    pass
+    raise SystemExit(
+        "This module provides config utilities. "
+        "Use using/visualize_road_config.py for interactive road-config previews."
+    )

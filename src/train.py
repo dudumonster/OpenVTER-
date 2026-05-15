@@ -200,28 +200,33 @@ def prepare_runtime_config(config: dict[str, Any]) -> tuple[Path, Path, Path, Pa
     return runtime_config_path, output_dir, log_dir, checkpoint_dir
 
 
-def main() -> None:
-    args = parse_args()
-    config_path = Path(args.config).expanduser()
-    if not config_path.is_absolute():
-        config_path = (PROJECT_ROOT / config_path).resolve()
-
-    config = load_config(config_path)
-    runtime_config_path, output_dir, log_dir, checkpoint_dir = prepare_runtime_config(config)
-
-    print(f"Project root   : {PROJECT_ROOT}")
-    print(f"Config file    : {config_path}")
-    print(f"Runtime config : {runtime_config_path}")
-    print(f"Output dir     : {output_dir}")
-    print(f"Log dir        : {log_dir}")
-    print(f"Checkpoint dir : {checkpoint_dir}")
-
+def validate_task(config: dict[str, Any]) -> None:
     task = config.get("task", "video_inference")
     if task != "video_inference":
         raise ValueError(
             f"Unsupported task '{task}'. "
             "This wrapper currently standardizes the OpenVTER video_inference flow."
         )
+
+
+def run_config(
+    config: dict[str, Any],
+    *,
+    config_path: Path | None = None,
+    echo_paths: bool = True,
+) -> tuple[Path, Path, Path, Path]:
+    runtime_config_path, output_dir, log_dir, checkpoint_dir = prepare_runtime_config(config)
+
+    if echo_paths:
+        print(f"Project root   : {PROJECT_ROOT}")
+        if config_path is not None:
+            print(f"Config file    : {config_path}")
+        print(f"Runtime config : {runtime_config_path}")
+        print(f"Output dir     : {output_dir}")
+        print(f"Log dir        : {log_dir}")
+        print(f"Checkpoint dir : {checkpoint_dir}")
+
+    validate_task(config)
 
     from video_inference_main import run_pipeline
 
@@ -234,7 +239,10 @@ def main() -> None:
         if step_int == 1:
             stabilize_output_path = _get_stabilize_output_path(config)
             if stabilize_output_path is not None and stabilize_output_path.exists():
-                print(f"Skipping workflow step 1: found existing stabilize file at {stabilize_output_path}")
+                print(
+                    "Skipping workflow step 1: "
+                    f"found existing stabilize file at {stabilize_output_path}"
+                )
                 continue
         print(f"Running workflow step: {step_int}")
         run_pipeline(
@@ -243,6 +251,18 @@ def main() -> None:
             config_parameter=int(config.get("config_parameter", 1)),
             multiprocessing=bool(config.get("multiprocessing", False)),
         )
+
+    return runtime_config_path, output_dir, log_dir, checkpoint_dir
+
+
+def main() -> None:
+    args = parse_args()
+    config_path = Path(args.config).expanduser()
+    if not config_path.is_absolute():
+        config_path = (PROJECT_ROOT / config_path).resolve()
+
+    config = load_config(config_path)
+    run_config(config, config_path=config_path)
 
 
 if __name__ == "__main__":

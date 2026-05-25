@@ -9,6 +9,7 @@
 @desc: 
 '''
 import torch
+import torch.cuda.amp
 import cv2
 import numpy as np
 from .decoder import DecDecoder
@@ -81,7 +82,7 @@ class CenterNet_BBA(object):
             new_images.append(image_data)
 
         image_batch = torch.from_numpy(np.transpose(np.array(new_images, dtype=np.float32) / 255 - 0.5, (0, 3, 1, 2)))
-        with torch.no_grad():
+        with torch.no_grad(), torch.cuda.amp.autocast():
             images = image_batch.to(self.device)
             outputs = self.model(images)
             predictions = self.decoder.ctdet_decode(outputs)

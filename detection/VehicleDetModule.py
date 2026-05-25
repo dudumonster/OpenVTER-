@@ -100,6 +100,15 @@ class VehicleDetModule:
         # print('prediction:',predictions)
         return predictions
 
+    def _convert_format_no_nms(self, predictions):
+        """Convert corner-point predictions to rotated-bbox format, skip per-tile NMS.
+        Global NMS in video_process.py handles cross-tile deduplication."""
+        np_boxes = self.four_points2bbox_angle_tensor(predictions)
+        boxes = torch.from_numpy(np_boxes).to(self.device)
+        if self.class_id_map is not None:
+            boxes[:, 14] = self._remap_class_ids(boxes[:, 14])
+        return boxes
+
     def _nms_rotated_tensor(self,predictions):
         np_boxes = self.four_points2bbox_angle_tensor(predictions)
         boxes = torch.from_numpy(np_boxes).to(self.device)
@@ -194,18 +203,29 @@ class VehicleDetModule:
     def inference_img_batch(self, image_ls):
         new_predictions_ls = self._process_img_batch(image_ls)
 
-        nms_results_ls = []
+        # Collect valid predictions and their tile indices
+        valid_preds = []
+        valid_indices = []
+        for i, pred in enumerate(new_predictions_ls):
+            if pred is not None and pred.size:
+                pred = self._filter_edge_bbox(pred)
+                if pred is not None and pred.size:
+                    valid_preds.append(pred)
+                    valid_indices.append(i)
 
-        for new_predictions in new_predictions_ls:
-            nms_results = None
-            if new_predictions is not None and new_predictions.size:
-                new_predictions = self._filter_edge_bbox(new_predictions)
-                if new_predictions is not None and new_predictions.size:
-                    nms_results = self._nms_rotated_tensor(new_predictions)
+        # Batch convert all valid predictions in ONE numpy→GPU transfer
+        if valid_preds:
+            all_np = np.concatenate(valid_preds, axis=0)
+            all_boxes = self._convert_format_no_nms(all_np)
+            tile_box_lists = torch.split(all_boxes, [p.shape[0] for p in valid_preds])
+        else:
+            tile_box_lists = []
 
-            nms_results_ls.append(nms_results)
-
-        return nms_results_ls
+        # Reconstruct per-tile results aligned with input order
+        results_ls = [None] * len(new_predictions_ls)
+        for idx, boxes in zip(valid_indices, tile_box_lists):
+            results_ls[idx] = boxes
+        return results_ls
 
     def _filter_edge_bbox(self,new_predictions):
         x_index = [0,2,4,6]

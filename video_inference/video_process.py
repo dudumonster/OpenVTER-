@@ -364,15 +364,34 @@ class DroneVideoProcess:
             select_positions = self.sub_positions[s:e]
             for det_model in self.det_models:
                 nms_results_ls = det_model.inference_img_batch(select_imgs)
+                valid_results = []
+                valid_positions = []
                 for nms_results,position in zip(nms_results_ls,select_positions):
                     if nms_results is None:
                         continue
-                    x, y = position
-
-                    position_arr = np.array([x, y, 0, 0, 0, x, y, x, y, x, y, x, y,0, 0],dtype=np.float32)#字段偏移量
-                    position_arr_t = torch.from_numpy(position_arr).to(det_model.device)# 将位置信息转换为tensor
-                    new_nms = nms_results + position_arr_t# 将检测结果与位置信息相加，得到新的检测结果
-                    new_nms_ls.append(new_nms)
+                    valid_results.append(nms_results)
+                    valid_positions.append(position)
+                if valid_results:
+                    batch_boxes = torch.vstack(valid_results)
+                    box_counts = torch.tensor(
+                        [res.shape[0] for res in valid_results],
+                        dtype=torch.long,
+                        device=batch_boxes.device,
+                    )
+                    positions_t = torch.as_tensor(
+                        valid_positions,
+                        dtype=batch_boxes.dtype,
+                        device=batch_boxes.device,
+                    )
+                    offsets = torch.zeros(
+                        (len(valid_positions), batch_boxes.shape[1]),
+                        dtype=batch_boxes.dtype,
+                        device=batch_boxes.device,
+                    )
+                    offsets[:, [0, 5, 7, 9, 11]] = positions_t[:, 0:1]
+                    offsets[:, [1, 6, 8, 10, 12]] = positions_t[:, 1:2]
+                    batch_offsets = torch.repeat_interleave(offsets, box_counts, dim=0)
+                    new_nms_ls.append(batch_boxes + batch_offsets)
         t3 = time.time()
         # 坐标轴
         if self.axis_image is not None:

@@ -7,6 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torch.cuda.amp
 
 
 class YOLOv5:
@@ -89,7 +90,7 @@ class YOLOv5:
         try:
             from models.common import DetectMultiBackend  # type: ignore
 
-            self.model = DetectMultiBackend(w, device=self.device, dnn=False, data=None, fp16=False)
+            self.model = DetectMultiBackend(w, device=self.device, dnn=False, data=None, fp16=True)
             self.model.eval()
             self.stride = int(getattr(self.model, "stride", 32) or 32)
             self._backend = "multibackend"
@@ -159,7 +160,7 @@ class YOLOv5:
         ims = [self._preprocess(img) for img in ori_image_ls]
         im = torch.cat(ims, dim=0)
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.cuda.amp.autocast():
             pred = self.model(im)
             # attempt_load backend returns (pred, ...) or [pred, ...]
             if isinstance(pred, (list, tuple)):

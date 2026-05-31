@@ -1,22 +1,31 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Convert OpenVTER pkl result folders into CSV datasets for visualization."""
+"""Convert OpenVTER det_bbox_result pkl files to the required trajectory CSV schema.
+
+The conversion source of truth is det_bbox_result_*.pkl -> traj_info.
+raw_det is not used as final trajectory data, and *_stab.pkl is only inspected.
+"""
 from __future__ import annotations
 
 import argparse
 import csv
-import datetime as _dt
 import json
 import logging
 import math
 import pickle
-import shutil
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
-from PIL import Image
+
+try:
+    from scipy.interpolate import PchipInterpolator
+    from scipy.signal import savgol_filter
+except Exception:  # pragma: no cover - fallback for lean environments.
+    PchipInterpolator = None
+    savgol_filter = None
 
 
 VIS_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +33,21 @@ DEFAULT_INITIAL_ROOT = VIS_ROOT / "Initial results"
 DEFAULT_ADJUSTED_ROOT = VIS_ROOT / "Adjusted results"
 DEFAULT_LOG_PATH = VIS_ROOT / "logs" / "conversion.log"
 
-CATEGORY_NAMES = [
+CATEGORY_ID_TO_CLASS = {
+    0: "car",
+    1: "truck",
+    2: "bus",
+    3: "freight_car",
+    4: "van",
+    5: "pedestrian",
+    6: "people",
+    7: "bicycle",
+    8: "tricycle",
+    9: "awning-tricycle",
+    10: "motor",
+}
+
+ALL_CLASSES = [
     "car",
     "truck",
     "bus",
@@ -38,85 +61,119 @@ CATEGORY_NAMES = [
     "motor",
 ]
 
-STATIC_GATE_CONFIG = {
-    "min_track_length": 30,
-    "max_displacement": 10.0,
-    "max_mean_speed": 0.5,
-    "static_ratio_threshold": 0.8,
-    "per_frame_motion_threshold": 1.0,
+VEHICLE_CLASSES = {"car", "truck", "bus", "freight_car", "van", "motor", "tricycle", "awning-tricycle"}
+VRU_CLASSES = {"pedestrian", "people", "bicycle", "tricycle", "awning-tricycle", "motor"}
+
+SHORT_GAP_MAX = 5
+MEDIUM_GAP_MAX = 15
+LONG_GAP_SPLIT = 30
+CONSECUTIVE_OUTLIER_SPLIT = 15
+
+PHYSICAL_LIMITS = {
+    "car": {"max_speed": 25.0, "max_acc": 8.0},
+    "van": {"max_speed": 25.0, "max_acc": 8.0},
+    "truck": {"max_speed": 25.0, "max_acc": 8.0},
+    "bus": {"max_speed": 25.0, "max_acc": 8.0},
+    "freight_car": {"max_speed": 25.0, "max_acc": 8.0},
+    "motor": {"max_speed": 20.0, "max_acc": 8.0},
+    "bicycle": {"max_speed": 12.0, "max_acc": 5.0},
+    "tricycle": {"max_speed": 12.0, "max_acc": 5.0},
+    "awning-tricycle": {"max_speed": 12.0, "max_acc": 5.0},
+    "pedestrian": {"max_speed": 6.0, "max_acc": 4.0},
+    "people": {"max_speed": 6.0, "max_acc": 4.0},
 }
 
-STATIC_GATE_VEHICLE_CLASSES = {"car", "truck", "bus", "freight_car", "van"}
-
-CORE_TRACK_FIELDS = [
-    "dataset_id",
-    "frame_id",
-    "object_id",
-    "class_name",
-    "confidence",
-    "x1",
-    "y1",
-    "x2",
-    "y2",
-    "cx",
-    "cy",
-    "width",
-    "height",
+CONFUSABLE_CLASS_GROUPS = [
+    {"car", "van"},
+    {"truck", "freight_car"},
+    {"tricycle", "awning-tricycle"},
+    {"pedestrian", "people"},
 ]
 
-EXTRA_TRACK_FIELDS = [
-    "category_id",
-    "output_frame",
-    "timestamp",
-    "angle_deg",
-    "q1_x",
-    "q1_y",
-    "q2_x",
-    "q2_y",
-    "q3_x",
-    "q3_y",
-    "q4_x",
-    "q4_y",
-    "world_q1_x",
-    "world_q1_y",
-    "world_q2_x",
-    "world_q2_y",
-    "world_q3_x",
-    "world_q3_y",
-    "world_q4_x",
-    "world_q4_y",
+# The converter writes two dataset versions:
+# full keeps every cleaned track, while moving_filtered removes long-lived,
+# nearly stationary motorized tracks. Values are in the current SI trajectory
+# units, so displacement is meters, mean_speed is m/s, and per-frame motion is m.
+STATIC_GATE = {
+    "min_track_length": 30,
+    "max_displacement": 1.0,
+    "max_mean_speed": 0.2,
+    "static_ratio_threshold": 0.8,
+    "per_frame_motion_threshold": 0.05,
+    "filter_classes": sorted(VEHICLE_CLASSES),
+}
+
+RECORDING_META_FIELDS = [
+    "recordingId",
+    "locationId",
+    "frameRate",
+    "numFrames",
+    "duration",
+    "numTracks",
+    "numVehicles",
+    "numVRUs",
+    "classTrackCounts",
+    "orthoPxToMeter",
+]
+
+TRACKS_META_FIELDS = [
+    "recordingId",
+    "trackId",
+    "initialFrame",
+    "finalFrame",
+    "numFrames",
+    "startXCenter",
+    "startYCenter",
+    "endXCenter",
+    "endYCenter",
+    "startLaneId",
+    "endLaneId",
+    "width",
+    "length",
+    "class",
+]
+
+TRACKS_FIELDS = [
+    "recordingId",
+    "trackId",
     "lane_id",
-    "source_row_index",
+    "frame",
+    "trackLifetime",
+    "xCenter",
+    "yCenter",
+    "heading",
+    "width",
+    "length",
+    "xVelocity",
+    "yVelocity",
+    "xAcceleration",
+    "yAcceleration",
+    "lonVelocity",
+    "latVelocity",
+    "lonAcceleration",
+    "latAcceleration",
+    "centerX",
+    "centerY",
 ]
 
 
 class ConversionError(RuntimeError):
-    """Raised when a dataset cannot be converted into the expected CSV shape."""
+    """Raised when source data cannot be converted."""
 
 
 def configure_logger(log_path: Path = DEFAULT_LOG_PATH) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("visualization_converter")
+    logger = logging.getLogger("standard_trajectory_converter")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
-
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
     return logger
-
-
-def category_name(category_id: Optional[int]) -> str:
-    if category_id is None:
-        return ""
-    if 0 <= category_id < len(CATEGORY_NAMES):
-        return CATEGORY_NAMES[category_id]
-    return f"class_{category_id}"
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -129,153 +186,46 @@ def _safe_float(value: Any) -> Optional[float]:
     return out
 
 
-def _csv_value(value: Any) -> Any:
+def _finite(value: Any) -> bool:
+    return _safe_float(value) is not None
+
+
+def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _format_value(field: str, value: Any) -> Any:
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, np.integer)):
+        return int(value)
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
             return ""
-        return f"{value:.6f}"
+        if field == "duration":
+            return f"{value:.3f}"
+        if field == "orthoPxToMeter":
+            return f"{value:.6f}"
+        if field == "heading":
+            return f"{value:.2f}"
+        return f"{value:.4f}"
     return value
 
 
-def _format_entry(entry: Tuple[Any, ...]) -> Tuple[int, int, Any, Optional[Any]]:
-    if not isinstance(entry, tuple) or len(entry) not in (3, 4):
-        raise ConversionError(f"traj_info entry must be tuple(frame_id, output_frame, array[, timestamp]), got {type(entry)}")
-    frame_id, output_frame, arr = entry[:3]
-    timestamp = entry[3] if len(entry) == 4 else None
-    return int(frame_id), int(output_frame), arr, timestamp
-
-
-def infer_detection_columns(num_cols: int) -> List[str]:
-    base = [
-        "q1_x",
-        "q1_y",
-        "q2_x",
-        "q2_y",
-        "q3_x",
-        "q3_y",
-        "q4_x",
-        "q4_y",
-        "confidence",
-        "category_id",
-        "object_id",
-    ]
-    if num_cols == 11:
-        return base
-    if num_cols == 19:
-        return base + [
-            "world_q1_x",
-            "world_q1_y",
-            "world_q2_x",
-            "world_q2_y",
-            "world_q3_x",
-            "world_q3_y",
-            "world_q4_x",
-            "world_q4_y",
-        ]
-    if num_cols == 20:
-        return base + [
-            "world_q1_x",
-            "world_q1_y",
-            "world_q2_x",
-            "world_q2_y",
-            "world_q3_x",
-            "world_q3_y",
-            "world_q4_x",
-            "world_q4_y",
-            "lane_id",
-        ]
-    raise ConversionError(
-        f"Unexpected traj_info array column count {num_cols}; expected 11, 19, or 20."
-    )
-
-
-def inspect_pkl_structure(pkl_path: Path) -> Dict[str, Any]:
-    with pkl_path.open("rb") as fh:
-        data = pickle.load(fh)
-    if not isinstance(data, dict):
-        raise ConversionError(f"{pkl_path.name} is {type(data).__name__}, expected dict.")
-
-    summary: Dict[str, Any] = {
-        "path": str(pkl_path),
-        "top_level_type": "dict",
-        "top_level_keys": list(data.keys()),
-    }
-    traj_info = data.get("traj_info")
-    if isinstance(traj_info, list):
-        summary["traj_info_length"] = len(traj_info)
-        frame_ids: List[int] = []
-        output_frames: List[int] = []
-        column_counts: Counter[int] = Counter()
-        non_empty_shapes: List[List[int]] = []
-        object_ids: set[int] = set()
-        category_ids: set[int] = set()
-        first_non_empty: Optional[np.ndarray] = None
-
-        for entry in traj_info:
-            try:
-                frame_id, output_frame, arr, _ = _format_entry(entry)
-            except Exception:
-                continue
-            frame_ids.append(frame_id)
-            output_frames.append(output_frame)
-            if isinstance(arr, np.ndarray):
-                cols = arr.shape[1] if arr.ndim == 2 else arr.shape[0]
-                column_counts[cols] += 1
-                if arr.ndim == 2 and len(arr) > 0:
-                    non_empty_shapes.append(list(arr.shape))
-                    first_non_empty = arr if first_non_empty is None else first_non_empty
-                    if arr.shape[1] > 10:
-                        object_ids.update(int(v) for v in arr[:, 10])
-                    if arr.shape[1] > 9:
-                        category_ids.update(int(v) for v in arr[:, 9])
-
-        summary.update(
-            {
-                "frame_id_min": min(frame_ids) if frame_ids else None,
-                "frame_id_max": max(frame_ids) if frame_ids else None,
-                "output_frame_min": min(output_frames) if output_frames else None,
-                "output_frame_max": max(output_frames) if output_frames else None,
-                "array_column_count_frequencies": dict(column_counts),
-                "non_empty_frame_count": len(non_empty_shapes),
-                "first_non_empty_shape": non_empty_shapes[0] if non_empty_shapes else None,
-                "object_id_count": len(object_ids),
-                "object_id_min": min(object_ids) if object_ids else None,
-                "object_id_max": max(object_ids) if object_ids else None,
-                "category_ids": sorted(category_ids),
-            }
-        )
-        if first_non_empty is not None:
-            cols = infer_detection_columns(first_non_empty.shape[1])
-            summary["traj_info_column_mapping"] = cols
-            summary["first_rows"] = first_non_empty[: min(5, len(first_non_empty))].tolist()
-    return summary
-
-
-def inspect_stabilization_pkl(stab_path: Path) -> Dict[str, Any]:
-    with stab_path.open("rb") as fh:
-        data = pickle.load(fh)
-    if not isinstance(data, dict):
-        return {"path": str(stab_path), "type": type(data).__name__}
-    keys = list(data.keys())
-    first_value = data[keys[0]] if keys else None
-    return {
-        "path": str(stab_path),
-        "type": "dict",
-        "frame_transform_count": len(data),
-        "sample_keys": [str(k) for k in keys[:5]],
-        "value_type": type(first_value).__name__ if first_value is not None else None,
-        "value_shape": list(first_value.shape) if isinstance(first_value, np.ndarray) else None,
-        "meaning": "per-frame 2x3 affine stabilization transform matrix",
-    }
+def _write_csv(path: Path, fieldnames: List[str], rows: Iterable[Dict[str, Any]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: _format_value(field, row.get(field, "")) for field in fieldnames})
 
 
 def _find_detection_pkl(dataset_dir: Path) -> Optional[Path]:
-    patterns = ["det_bbox_result_*.pkl", "stitch_bbox_result_*.pkl", "*.detpkl", "*.pkl"]
-    for pattern in patterns:
+    for pattern in ("det_bbox_result_*.pkl", "stitch_bbox_result_*.pkl", "*.detpkl", "*.pkl"):
         matches = sorted(dataset_dir.glob(pattern))
-        matches = [p for p in matches if "_stab" not in p.stem.lower() and "stab" not in p.stem.lower()]
+        matches = [p for p in matches if "stab" not in p.stem.lower()]
         if matches:
             return matches[0]
     return None
@@ -286,385 +236,789 @@ def _find_stabilization_pkl(dataset_dir: Path) -> Optional[Path]:
     return matches[0] if matches else None
 
 
-def _find_background(dataset_dir: Path) -> Tuple[Optional[Path], List[str]]:
-    warnings: List[str] = []
-    image_patterns = [
-        "background_*.jpg",
-        "background_*.jpeg",
-        "background_*.png",
-        "background*.jpg",
-        "first_frame_*.jpg",
-        "first_frame_*.jpeg",
-        "first_frame_*.png",
-    ]
-    for pattern in image_patterns:
-        matches = sorted(dataset_dir.glob(pattern))
-        if matches:
-            if not matches[0].name.lower().startswith("background"):
-                warnings.append("background_*.jpg not found; using first_frame image as background.")
-            return matches[0], warnings
-    warnings.append("No background_*.jpg or first_frame_*.jpg found; frontend will use a blank canvas.")
-    return None, warnings
-
-
-def _image_size(image_path: Optional[Path]) -> Tuple[Optional[int], Optional[int]]:
-    if image_path is None:
-        return None, None
-    with Image.open(image_path) as image:
-        width, height = image.size
-    return int(width), int(height)
+def _parse_folder_identity(folder_name: str, warnings: List[str]) -> Tuple[str, str]:
+    parts = folder_name.rsplit("_", 1)
+    if len(parts) == 2 and re.fullmatch(r"\d+", parts[1]):
+        return parts[1], parts[0]
+    warnings.append(
+        f"Folder name '{folder_name}' does not end with an underscore numeric id; "
+        "recordingId and locationId both use folderName."
+    )
+    return folder_name, folder_name
 
 
 def _video_info(data: Dict[str, Any]) -> Dict[str, Any]:
-    info = {}
     video_info = data.get("video_info")
-    if isinstance(video_info, list) and video_info:
-        first = video_info[0]
-        if isinstance(first, dict):
-            info = first
-    elif isinstance(video_info, dict):
-        info = video_info
-    return info
+    if isinstance(video_info, list) and video_info and isinstance(video_info[0], dict):
+        return video_info[0]
+    if isinstance(video_info, dict):
+        return video_info
+    return {}
 
 
-def _timestamp(frame_id: int, frame_time: Any, fps: Optional[float]) -> Optional[float]:
-    value = _safe_float(frame_time)
-    if value is not None:
-        return value
-    if fps and fps > 0:
-        return frame_id / fps
-    return None
+def _format_entry(entry: Tuple[Any, ...]) -> Tuple[int, int, Any, Optional[Any]]:
+    if not isinstance(entry, tuple) or len(entry) not in (3, 4):
+        raise ConversionError(f"traj_info entry must be tuple(frame, output_frame, array[, time]), got {type(entry)}")
+    frame_id, output_frame, arr = entry[:3]
+    frame_time = entry[3] if len(entry) == 4 else None
+    return int(frame_id), int(output_frame), arr, frame_time
 
 
-def _angle_deg(points: np.ndarray) -> Optional[float]:
-    if points.shape != (4, 2):
-        return None
-    dx = points[1, 0] - points[0, 0]
-    dy = points[1, 1] - points[0, 1]
-    if dx == 0 and dy == 0:
-        return None
-    return float(math.degrees(math.atan2(dy, dx)))
+def _mode_class(rows: List[Dict[str, Any]], logger: logging.Logger, label: str, quality: Dict[str, Any]) -> Tuple[str, float, bool, Dict[str, int]]:
+    real_rows = [row for row in rows if not row.get("is_interpolated")]
+    if not real_rows:
+        quality["warnings"].append(f"{label}: no real detection rows for class majority; fallback to first raw_class.")
+        first = rows[0].get("raw_class") or "car"
+        return first, 0.0, True, {first: 0}
 
+    counts: Counter[str] = Counter(row["raw_class"] for row in real_rows)
+    conf_sums: Dict[str, float] = defaultdict(float)
+    first_frame: Dict[str, int] = {}
+    for row in real_rows:
+        cls = row["raw_class"]
+        conf_sums[cls] += float(row.get("confidence") or 0.0)
+        first_frame.setdefault(cls, int(row["frame"]))
 
-def _make_track_record(
-    dataset_id: str,
-    frame_id: int,
-    output_frame: int,
-    timestamp: Optional[float],
-    row: np.ndarray,
-    row_index: int,
-) -> Dict[str, Any]:
-    row = np.asarray(row, dtype=float)
-    if row.shape[0] < 11:
-        raise ConversionError(
-            f"Frame {frame_id} row {row_index} has {row.shape[0]} columns; object_id requires at least 11."
+    max_count = max(counts.values())
+    candidates = [cls for cls, count in counts.items() if count == max_count]
+    max_conf = max(conf_sums[cls] for cls in candidates)
+    candidates = [cls for cls in candidates if abs(conf_sums[cls] - max_conf) < 1e-9]
+    if len(candidates) > 1:
+        chosen = min(candidates, key=lambda cls: first_frame[cls])
+        msg = f"{label}: class majority tie {dict(counts)}, confidence tie; choose earliest class '{chosen}'."
+        logger.warning(msg)
+        quality["warnings"].append(msg)
+    else:
+        chosen = candidates[0]
+
+    ratio = counts[chosen] / float(len(real_rows))
+    unstable = ratio < 0.7
+    if len(counts) > 1:
+        quality["category_jump_tracks"].append(
+            {"track": label, "class_counts": dict(counts), "final_class": chosen, "final_class_ratio": ratio}
         )
-    points = row[:8].reshape(4, 2)
-    xs = points[:, 0]
-    ys = points[:, 1]
-    x1, y1, x2, y2 = float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
-    category_id = int(row[9]) if not math.isnan(float(row[9])) else None
-    object_id = int(row[10]) if not math.isnan(float(row[10])) else None
-    if object_id is None:
-        raise ConversionError(f"Frame {frame_id} row {row_index} is missing object_id.")
-
-    record: Dict[str, Any] = {
-        "dataset_id": dataset_id,
-        "frame_id": frame_id,
-        "object_id": object_id,
-        "class_name": category_name(category_id),
-        "confidence": _safe_float(row[8]),
-        "x1": x1,
-        "y1": y1,
-        "x2": x2,
-        "y2": y2,
-        "cx": float(points[:, 0].mean()),
-        "cy": float(points[:, 1].mean()),
-        "width": x2 - x1,
-        "height": y2 - y1,
-        "category_id": category_id,
-        "output_frame": output_frame,
-        "timestamp": timestamp,
-        "angle_deg": _angle_deg(points),
-        "q1_x": float(points[0, 0]),
-        "q1_y": float(points[0, 1]),
-        "q2_x": float(points[1, 0]),
-        "q2_y": float(points[1, 1]),
-        "q3_x": float(points[2, 0]),
-        "q3_y": float(points[2, 1]),
-        "q4_x": float(points[3, 0]),
-        "q4_y": float(points[3, 1]),
-        "source_row_index": row_index,
-    }
-
-    if row.shape[0] >= 19:
-        world = row[11:19].reshape(4, 2)
-        for idx in range(4):
-            record[f"world_q{idx + 1}_x"] = float(world[idx, 0])
-            record[f"world_q{idx + 1}_y"] = float(world[idx, 1])
-    if row.shape[0] >= 20:
-        lane_value = _safe_float(row[19])
-        record["lane_id"] = int(lane_value) if lane_value is not None else ""
-    return record
+    if unstable:
+        quality["category_unstable_tracks"].append(
+            {"track": label, "class_counts": dict(counts), "final_class": chosen, "final_class_ratio": ratio}
+        )
+    return chosen, ratio, unstable, dict(counts)
 
 
-def _write_csv(path: Path, fieldnames: List[str], records: Iterable[Dict[str, Any]]) -> None:
-    with path.open("w", newline="", encoding="utf-8-sig") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for record in records:
-            writer.writerow({field: _csv_value(record.get(field, "")) for field in fieldnames})
+def _edge_sizes(world: np.ndarray) -> Tuple[float, float]:
+    e12 = _dist(tuple(world[0]), tuple(world[1]))
+    e23 = _dist(tuple(world[1]), tuple(world[2]))
+    e34 = _dist(tuple(world[2]), tuple(world[3]))
+    e41 = _dist(tuple(world[3]), tuple(world[0]))
+    edge_a = (e12 + e34) / 2.0
+    edge_b = (e23 + e41) / 2.0
+    return min(edge_a, edge_b), max(edge_a, edge_b)
 
 
-def _compute_object_metrics(records: List[Dict[str, Any]], static_gate: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
-    grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    for record in records:
-        grouped[int(record["object_id"])].append(record)
+def _long_edge_heading(row: Dict[str, Any]) -> Optional[float]:
+    pts = [
+        (row.get("world_q1_x"), row.get("world_q1_y")),
+        (row.get("world_q2_x"), row.get("world_q2_y")),
+        (row.get("world_q3_x"), row.get("world_q3_y")),
+        (row.get("world_q4_x"), row.get("world_q4_y")),
+    ]
+    if not all(_finite(x) and _finite(y) for x, y in pts):
+        return None
+    edges = [
+        (pts[0], pts[1]),
+        (pts[1], pts[2]),
+        (pts[2], pts[3]),
+        (pts[3], pts[0]),
+    ]
+    a, b = max(edges, key=lambda edge: _dist(edge[0], edge[1]))
+    dx = float(b[0]) - float(a[0])
+    dy = float(b[1]) - float(a[1])
+    if math.hypot(dx, dy) < 1e-9:
+        return None
+    return math.degrees(math.atan2(dx, dy)) % 360.0
 
-    metrics: Dict[int, Dict[str, Any]] = {}
-    for object_id, rows in sorted(grouped.items()):
-        rows = sorted(rows, key=lambda item: int(item["frame_id"]))
-        frames = sorted({int(row["frame_id"]) for row in rows})
-        class_counts = Counter(row.get("class_name", "") for row in rows)
-        class_name = class_counts.most_common(1)[0][0] if class_counts else ""
-        confs = [float(row["confidence"]) for row in rows if row.get("confidence") not in (None, "")]
 
-        start = rows[0]
-        end = rows[-1]
-        start_cx, start_cy = float(start["cx"]), float(start["cy"])
-        end_cx, end_cy = float(end["cx"]), float(end["cy"])
-        displacement = math.hypot(end_cx - start_cx, end_cy - start_cy)
+def _expand_traj_info(data: Dict[str, Any], logger: logging.Logger, quality: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[int, Dict[str, Any]], Counter[int]]:
+    traj_info = data.get("traj_info")
+    if not isinstance(traj_info, list) or not traj_info:
+        raise ConversionError("det pkl missing non-empty list field 'traj_info'.")
 
-        path_length = 0.0
-        speeds: List[float] = []
-        static_steps = 0
-        for prev, cur in zip(rows[:-1], rows[1:]):
-            frame_gap = max(1, int(cur["frame_id"]) - int(prev["frame_id"]))
-            dist = math.hypot(float(cur["cx"]) - float(prev["cx"]), float(cur["cy"]) - float(prev["cy"]))
-            speed = dist / frame_gap
-            path_length += dist
-            speeds.append(speed)
-            if speed < float(static_gate["per_frame_motion_threshold"]):
-                static_steps += 1
+    rows: List[Dict[str, Any]] = []
+    frame_meta: Dict[int, Dict[str, Any]] = {}
+    col_counts: Counter[int] = Counter()
+    unknown_category_ids: set[int] = set()
+    invalid_world_rows = 0
+    lane_minus_one = 0
 
-        mean_speed = float(sum(speeds) / len(speeds)) if speeds else 0.0
-        max_speed = float(max(speeds)) if speeds else 0.0
-        static_ratio = float(static_steps / len(speeds)) if speeds else 1.0
+    for entry in traj_info:
+        frame, output_frame, arr, frame_time = _format_entry(entry)
+        frame_meta.setdefault(frame, {"output_frame": output_frame, "frame_time": frame_time})
+        if arr is None:
+            continue
+        arr = np.asarray(arr)
+        if arr.size == 0:
+            continue
+        if arr.ndim != 2 or arr.shape[1] < 19:
+            raise ConversionError(f"Frame {frame} array must be 2D with at least 19 columns, got {arr.shape}.")
+        col_counts[arr.shape[1]] += 1
 
-        filter_reason = ""
-        is_static = False
-        if class_name in STATIC_GATE_VEHICLE_CLASSES and len(frames) >= int(static_gate["min_track_length"]):
-            low_total_motion = (
-                displacement < float(static_gate["max_displacement"])
-                and mean_speed < float(static_gate["max_mean_speed"])
+        for row_index, raw in enumerate(arr):
+            raw = np.asarray(raw, dtype=float)
+            category_id = int(raw[9]) if _finite(raw[9]) else -1
+            raw_class = CATEGORY_ID_TO_CLASS.get(category_id)
+            if raw_class is None:
+                raw_class = f"unknown_{category_id}"
+                unknown_category_ids.add(category_id)
+            object_id = int(raw[10]) if _finite(raw[10]) else None
+            if object_id is None:
+                quality["warnings"].append(f"Frame {frame} row {row_index}: missing object_id; row skipped.")
+                continue
+
+            pixel = raw[0:8].reshape(4, 2)
+            world = raw[11:19].reshape(4, 2)
+            if not np.isfinite(world).all():
+                invalid_world_rows += 1
+                continue
+
+            raw_width, raw_length = _edge_sizes(world)
+            x_center = float(world[:, 0].mean())
+            y_center = float(world[:, 1].mean())
+            lane_id = int(raw[19]) if raw.shape[0] >= 20 and _finite(raw[19]) else -1
+            if lane_id == -1:
+                lane_minus_one += 1
+
+            rows.append(
+                {
+                    "frame": frame,
+                    "output_frame": output_frame,
+                    "object_id": object_id,
+                    "category_id": category_id,
+                    "raw_class": raw_class,
+                    "confidence": float(raw[8]) if _finite(raw[8]) else math.nan,
+                    "lane_id": lane_id,
+                    "q1_x": float(pixel[0, 0]),
+                    "q1_y": float(pixel[0, 1]),
+                    "q2_x": float(pixel[1, 0]),
+                    "q2_y": float(pixel[1, 1]),
+                    "q3_x": float(pixel[2, 0]),
+                    "q3_y": float(pixel[2, 1]),
+                    "q4_x": float(pixel[3, 0]),
+                    "q4_y": float(pixel[3, 1]),
+                    "world_q1_x": float(world[0, 0]),
+                    "world_q1_y": float(world[0, 1]),
+                    "world_q2_x": float(world[1, 0]),
+                    "world_q2_y": float(world[1, 1]),
+                    "world_q3_x": float(world[2, 0]),
+                    "world_q3_y": float(world[2, 1]),
+                    "world_q4_x": float(world[3, 0]),
+                    "world_q4_y": float(world[3, 1]),
+                    "xCenter_raw": x_center,
+                    "yCenter_raw": y_center,
+                    "raw_width": raw_width,
+                    "raw_length": raw_length,
+                    "is_interpolated": False,
+                    "is_outlier": False,
+                    "source_row_index": row_index,
+                }
             )
-            mostly_static = static_ratio > float(static_gate["static_ratio_threshold"])
-            if low_total_motion or mostly_static:
-                is_static = True
-                reasons = []
-                if low_total_motion:
-                    reasons.append(
-                        "displacement<%.2f and mean_speed<%.2f"
-                        % (float(static_gate["max_displacement"]), float(static_gate["max_mean_speed"]))
-                    )
-                if mostly_static:
-                    reasons.append("static_ratio>%.2f" % float(static_gate["static_ratio_threshold"]))
-                filter_reason = "; ".join(reasons)
 
-        metrics[object_id] = {
-            "object_id": object_id,
-            "class_name": class_name,
-            "start_frame": frames[0],
-            "end_frame": frames[-1],
-            "total_frames": len(frames),
-            "mean_confidence": float(sum(confs) / len(confs)) if confs else None,
-            "start_cx": start_cx,
-            "start_cy": start_cy,
-            "end_cx": end_cx,
-            "end_cy": end_cy,
-            "displacement": displacement,
-            "path_length": path_length,
-            "mean_speed": mean_speed,
-            "max_speed": max_speed,
-            "static_ratio": static_ratio,
-            "is_static": is_static,
-            "filter_reason": filter_reason,
-        }
-    return metrics
+    if invalid_world_rows:
+        logger.warning("%s rows have invalid world coordinates and were skipped.", invalid_world_rows)
+    if unknown_category_ids:
+        logger.warning("Unknown category_id values: %s", sorted(unknown_category_ids))
+    quality["invalid_world_rows"] = invalid_world_rows
+    quality["lane_id_minus_one_records"] = lane_minus_one
+    quality["unknown_category_ids"] = sorted(unknown_category_ids)
+    return rows, frame_meta, col_counts
 
 
-def _object_records(dataset_id: str, records: List[Dict[str, Any]], metrics: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    object_ids = sorted({int(record["object_id"]) for record in records})
-    objects = []
-    for object_id in object_ids:
-        metric = metrics[object_id]
-        row = {"dataset_id": dataset_id}
-        row.update(metric)
-        objects.append(row)
-    return objects
+def _should_split(prev: Dict[str, Any], cur: Dict[str, Any], final_class: str, frame_rate: float) -> bool:
+    gap = int(cur["frame"]) - int(prev["frame"]) - 1
+    if gap > LONG_GAP_SPLIT:
+        return True
+    dt = max((int(cur["frame"]) - int(prev["frame"])) / frame_rate, 1.0 / frame_rate)
+    speed = _dist((prev["xCenter_raw"], prev["yCenter_raw"]), (cur["xCenter_raw"], cur["yCenter_raw"])) / dt
+    limit = PHYSICAL_LIMITS.get(final_class, PHYSICAL_LIMITS["car"])["max_speed"]
+    return speed > limit * 1.5
 
 
-def _frame_records(
-    dataset_id: str,
-    frame_meta: Dict[int, Dict[str, Any]],
-    records: List[Dict[str, Any]],
-    width: Optional[int],
-    height: Optional[int],
-) -> List[Dict[str, Any]]:
-    counts = Counter(int(row["frame_id"]) for row in records)
-    frames = []
-    for frame_id in sorted(frame_meta.keys()):
-        meta = frame_meta[frame_id]
-        frames.append(
+def _split_raw_tracks(raw_rows: List[Dict[str, Any]], frame_rate: float, logger: logging.Logger, quality: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
+    grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for row in raw_rows:
+        grouped[int(row["object_id"])].append(row)
+
+    fragments: List[List[Dict[str, Any]]] = []
+    for object_id, rows in sorted(grouped.items()):
+        rows = sorted(rows, key=lambda item: int(item["frame"]))
+        final_class, _, _, class_counts = _mode_class(rows, logger, f"object_id={object_id}", quality)
+        if len(class_counts) > 1:
+            quality["raw_object_category_jump_count"] += 1
+        current: List[Dict[str, Any]] = [rows[0]]
+        for prev, cur in zip(rows[:-1], rows[1:]):
+            gap = int(cur["frame"]) - int(prev["frame"]) - 1
+            if gap > 0:
+                quality["gap_tracks"].add(object_id)
+                if gap <= SHORT_GAP_MAX:
+                    quality["short_gap_count"] += gap
+                elif gap <= MEDIUM_GAP_MAX:
+                    quality["medium_gap_count"] += gap
+                else:
+                    quality["long_gap_count"] += gap
+            if _should_split(prev, cur, final_class, frame_rate):
+                fragments.append(current)
+                current = [cur]
+                quality["split_track_count"] += 1
+            else:
+                current.append(cur)
+        fragments.append(current)
+    return fragments
+
+
+def _interpolate_values(frames: List[int], values: List[float], new_frames: List[int]) -> List[float]:
+    if len(frames) >= 3 and PchipInterpolator is not None:
+        try:
+            f = PchipInterpolator(np.asarray(frames, dtype=float), np.asarray(values, dtype=float))
+            return [float(v) for v in f(np.asarray(new_frames, dtype=float))]
+        except Exception:
+            pass
+    return [float(v) for v in np.interp(new_frames, frames, values)]
+
+
+def _interpolate_between(prev: Dict[str, Any], cur: Dict[str, Any], final_class: str, frame_rate: float) -> List[Dict[str, Any]]:
+    gap = int(cur["frame"]) - int(prev["frame"]) - 1
+    if gap <= 0:
+        return []
+    if gap > SHORT_GAP_MAX:
+        dt = (int(cur["frame"]) - int(prev["frame"])) / frame_rate
+        speed = _dist((prev["xCenter_raw"], prev["yCenter_raw"]), (cur["xCenter_raw"], cur["yCenter_raw"])) / max(dt, 1.0 / frame_rate)
+        limit = PHYSICAL_LIMITS.get(final_class, PHYSICAL_LIMITS["car"])["max_speed"]
+        same_or_known_lane = prev["lane_id"] == cur["lane_id"] or prev["lane_id"] == -1 or cur["lane_id"] == -1
+        if gap > MEDIUM_GAP_MAX or speed > limit or not same_or_known_lane:
+            return []
+
+    frames = [int(prev["frame"]), int(cur["frame"])]
+    new_frames = list(range(frames[0] + 1, frames[1]))
+    xs = _interpolate_values(frames, [prev["xCenter_raw"], cur["xCenter_raw"]], new_frames)
+    ys = _interpolate_values(frames, [prev["yCenter_raw"], cur["yCenter_raw"]], new_frames)
+    widths = _interpolate_values(frames, [prev["raw_width"], cur["raw_width"]], new_frames)
+    lengths = _interpolate_values(frames, [prev["raw_length"], cur["raw_length"]], new_frames)
+    rows = []
+    for frame, x, y, width, length in zip(new_frames, xs, ys, widths, lengths):
+        lane = prev["lane_id"] if prev["lane_id"] == cur["lane_id"] else (prev["lane_id"] if frame - frames[0] <= frames[1] - frame else cur["lane_id"])
+        item = dict(prev)
+        item.update(
             {
-                "dataset_id": dataset_id,
-                "frame_id": frame_id,
-                "timestamp": meta.get("timestamp"),
-                "width": width,
-                "height": height,
-                "num_objects": counts.get(frame_id, 0),
-                "output_frame": meta.get("output_frame"),
+                "frame": frame,
+                "output_frame": frame,
+                "lane_id": lane if lane is not None else -1,
+                "raw_class": final_class,
+                "category_id": None,
+                "confidence": math.nan,
+                "xCenter_raw": x,
+                "yCenter_raw": y,
+                "raw_width": min(width, length),
+                "raw_length": max(width, length),
+                "is_interpolated": True,
+                "is_outlier": False,
+                "source_row_index": -1,
             }
         )
-    return frames
+        rows.append(item)
+    return rows
 
 
-def _version_metadata(
-    dataset_id: str,
-    version: str,
-    records: List[Dict[str, Any]],
-    frame_meta: Dict[int, Dict[str, Any]],
-    image_width: Optional[int],
-    image_height: Optional[int],
-    background_image_name: Optional[str],
-    source_folder: str,
-    fps: float,
-    det_pkl: Path,
-    stab_pkl: Optional[Path],
-    column_counts: Counter[int],
-    warnings: List[str],
-    pkl_structure: Dict[str, Any],
-    object_metrics: Dict[int, Dict[str, Any]],
-    static_gate: Dict[str, Any],
-    filtered_object_ids: List[int],
-) -> Dict[str, Any]:
-    object_ids = {int(record["object_id"]) for record in records}
+def _mark_isolated_outliers(rows: List[Dict[str, Any]], final_class: str, frame_rate: float, quality: Dict[str, Any]) -> None:
+    if len(rows) < 3:
+        return
+    limit = PHYSICAL_LIMITS.get(final_class, PHYSICAL_LIMITS["car"])
+    for i in range(1, len(rows) - 1):
+        prev, cur, nxt = rows[i - 1], rows[i], rows[i + 1]
+        if cur.get("is_interpolated"):
+            continue
+        dt_prev = max((cur["frame"] - prev["frame"]) / frame_rate, 1.0 / frame_rate)
+        dt_next = max((nxt["frame"] - cur["frame"]) / frame_rate, 1.0 / frame_rate)
+        d_prev = _dist((cur["xCenter_raw"], cur["yCenter_raw"]), (prev["xCenter_raw"], prev["yCenter_raw"]))
+        d_next = _dist((nxt["xCenter_raw"], nxt["yCenter_raw"]), (cur["xCenter_raw"], cur["yCenter_raw"]))
+        d_bridge = _dist((nxt["xCenter_raw"], nxt["yCenter_raw"]), (prev["xCenter_raw"], prev["yCenter_raw"]))
+        speed_bad = d_prev / dt_prev > limit["max_speed"] or d_next / dt_next > limit["max_speed"]
+        bridge_ok = d_bridge / max((nxt["frame"] - prev["frame"]) / frame_rate, 1.0 / frame_rate) <= limit["max_speed"]
+        if speed_bad and bridge_ok:
+            cur["is_outlier"] = True
+            cur["xCenter_raw"] = math.nan
+            cur["yCenter_raw"] = math.nan
+            quality["outlier_frame_count"] += 1
+
+
+def _fill_nan_centers(rows: List[Dict[str, Any]]) -> None:
+    frames = [int(row["frame"]) for row in rows]
+    for key in ("xCenter_raw", "yCenter_raw"):
+        valid_frames = [frame for frame, row in zip(frames, rows) if _finite(row.get(key))]
+        valid_values = [float(row[key]) for row in rows if _finite(row.get(key))]
+        if len(valid_frames) < 2:
+            continue
+        new_values = _interpolate_values(valid_frames, valid_values, frames)
+        for row, value in zip(rows, new_values):
+            row[key] = value
+
+
+def _smooth_series(values: List[float], quality: Dict[str, Any], label: str) -> List[float]:
+    n = len(values)
+    if n < 5 or savgol_filter is None:
+        if n < 5:
+            quality["short_tracks"].append(label)
+        return [float(v) for v in values]
+    window = 15 if n >= 15 else (n if n % 2 == 1 else n - 1)
+    if window < 5:
+        return [float(v) for v in values]
+    try:
+        return [float(v) for v in savgol_filter(np.asarray(values, dtype=float), window_length=window, polyorder=2, mode="interp")]
+    except Exception:
+        return [float(v) for v in values]
+
+
+def _valid_dimensions(rows: List[Dict[str, Any]], quality: Dict[str, Any]) -> Tuple[List[float], List[float]]:
+    widths = [float(row["raw_width"]) for row in rows if _finite(row.get("raw_width")) and row["raw_width"] > 0]
+    lengths = [float(row["raw_length"]) for row in rows if _finite(row.get("raw_length")) and row["raw_length"] > 0]
+    if not widths or not lengths:
+        return [], []
+    med_w = float(np.median(widths))
+    med_l = float(np.median(lengths))
+    valid_w, valid_l = [], []
+    for row in rows:
+        w, l = row.get("raw_width"), row.get("raw_length")
+        if not (_finite(w) and _finite(l) and w > 0 and l > 0):
+            continue
+        if w > 2.5 * med_w or w < 0.4 * med_w or l > 2.5 * med_l or l < 0.4 * med_l:
+            quality["size_outlier_frame_count"] += 1
+            row["size_outlier"] = True
+            continue
+        valid_w.append(float(min(w, l)))
+        valid_l.append(float(max(w, l)))
+    return valid_w, valid_l
+
+
+def _differentiate(values: List[float], frames: List[int], frame_rate: float) -> List[float]:
+    n = len(values)
+    if n == 1:
+        return [0.0]
+    out = []
+    times = [frame / frame_rate for frame in frames]
+    for i in range(n):
+        if i == 0:
+            j0, j1 = 0, 1
+        elif i == n - 1:
+            j0, j1 = n - 2, n - 1
+        else:
+            j0, j1 = i - 1, i + 1
+        dt = times[j1] - times[j0]
+        out.append(0.0 if abs(dt) < 1e-12 else (values[j1] - values[j0]) / dt)
+    return out
+
+
+def _compute_heading(xs: List[float], ys: List[float], rows: List[Dict[str, Any]], frame_rate: float, logger: logging.Logger, label: str) -> List[float]:
+    n = len(xs)
+    half_window = max(1, int(round(0.25 * frame_rate)))
+    headings: List[Optional[float]] = []
+    last_valid: Optional[float] = None
+    for i in range(n):
+        j0 = max(0, i - half_window)
+        j1 = min(n - 1, i + half_window)
+        dx = xs[j1] - xs[j0]
+        dy = ys[j1] - ys[j0]
+        if math.hypot(dx, dy) >= 0.2:
+            last_valid = math.degrees(math.atan2(dx, dy)) % 360.0
+            headings.append(last_valid)
+        elif last_valid is not None:
+            headings.append(last_valid)
+        else:
+            headings.append(None)
+
+    fallback = next((_long_edge_heading(row) for row in rows if _long_edge_heading(row) is not None), None)
+    if fallback is None:
+        fallback = 0.0
+        logger.warning("%s has no valid motion or bbox heading; heading fallback is 0.0.", label)
+    return [float(h if h is not None else fallback) for h in headings]
+
+
+def _estimate_ortho_px_to_meter(rows: List[Dict[str, Any]], logger: logging.Logger) -> Optional[float]:
+    scales = []
+    for row in rows:
+        pixel_pts = [
+            (row["q1_x"], row["q1_y"]),
+            (row["q2_x"], row["q2_y"]),
+            (row["q3_x"], row["q3_y"]),
+            (row["q4_x"], row["q4_y"]),
+        ]
+        world_pts = [
+            (row["world_q1_x"], row["world_q1_y"]),
+            (row["world_q2_x"], row["world_q2_y"]),
+            (row["world_q3_x"], row["world_q3_y"]),
+            (row["world_q4_x"], row["world_q4_y"]),
+        ]
+        for i, j in ((0, 1), (1, 2), (2, 3), (3, 0)):
+            px_len = _dist(pixel_pts[i], pixel_pts[j])
+            w_len = _dist(world_pts[i], world_pts[j])
+            if px_len > 1e-6 and w_len > 1e-6:
+                scales.append(w_len / px_len)
+    if len(scales) < 30:
+        logger.warning("Not enough valid pixel/world edge pairs to estimate orthoPxToMeter.")
+        return None
+    arr = np.asarray(scales, dtype=float)
+    q1, q3 = np.percentile(arr, [25, 75])
+    iqr = q3 - q1
+    if iqr > 0:
+        arr = arr[(arr >= q1 - 1.5 * iqr) & (arr <= q3 + 1.5 * iqr)]
+    return float(np.median(arr)) if arr.size else None
+
+
+def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float, logger: logging.Logger, quality: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    prepared = []
+    for idx, fragment in enumerate(fragments, start=1):
+        fragment = [dict(row) for row in sorted(fragment, key=lambda item: int(item["frame"]))]
+        label = f"fragment={idx},object_id={fragment[0]['object_id']}"
+        final_class, ratio, unstable, class_counts = _mode_class(fragment, logger, label, quality)
+        _mark_isolated_outliers(fragment, final_class, frame_rate, quality)
+        _fill_nan_centers(fragment)
+
+        with_gaps: List[Dict[str, Any]] = []
+        for prev, cur in zip(fragment[:-1], fragment[1:]):
+            with_gaps.append(prev)
+            inserts = _interpolate_between(prev, cur, final_class, frame_rate)
+            if inserts:
+                quality["interpolated_frame_count"] += len(inserts)
+            with_gaps.extend(inserts)
+        with_gaps.append(fragment[-1])
+        with_gaps = sorted(with_gaps, key=lambda item: int(item["frame"]))
+        prepared.append(
+            {
+                "rows": with_gaps,
+                "final_class": final_class,
+                "final_class_ratio": ratio,
+                "category_unstable": unstable,
+                "class_counts": class_counts,
+                "original_object_id": int(fragment[0]["object_id"]),
+            }
+        )
+
+    # Conservative stitching is intentionally disabled unless a single unambiguous candidate is found.
+    # Current implementation records zero merges rather than making aggressive ID merges.
+    quality["stitched_track_count"] = 0
+    prepared.sort(key=lambda item: (item["rows"][0]["frame"], item["original_object_id"]))
+
+    class_dim_values: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: {"widths": [], "lengths": []})
+    track_payloads = []
+    for item in prepared:
+        valid_w, valid_l = _valid_dimensions(item["rows"], quality)
+        if valid_w and valid_l:
+            class_dim_values[item["final_class"]]["widths"].extend(valid_w)
+            class_dim_values[item["final_class"]]["lengths"].extend(valid_l)
+        track_payloads.append((item, valid_w, valid_l))
+
+    class_dim_mean = {}
+    for cls, vals in class_dim_values.items():
+        if vals["widths"] and vals["lengths"]:
+            class_dim_mean[cls] = (float(np.mean(vals["widths"])), float(np.mean(vals["lengths"])))
+
+    tracks_meta: List[Dict[str, Any]] = []
+    tracks_rows: List[Dict[str, Any]] = []
+    for track_id, (item, valid_w, valid_l) in enumerate(track_payloads, start=1):
+        rows = item["rows"]
+        final_class = item["final_class"]
+        if valid_w and valid_l:
+            mean_width = float(np.mean(valid_w))
+            mean_length = float(np.mean(valid_l))
+        else:
+            med_w = [row["raw_width"] for row in rows if _finite(row.get("raw_width"))]
+            med_l = [row["raw_length"] for row in rows if _finite(row.get("raw_length"))]
+            if med_w and med_l:
+                mean_width = float(np.median(med_w))
+                mean_length = float(np.median(med_l))
+            elif final_class in class_dim_mean:
+                mean_width, mean_length = class_dim_mean[final_class]
+            else:
+                mean_width, mean_length = math.nan, math.nan
+                logger.warning("trackId %s has insufficient size data and no class fallback.", track_id)
+        if _finite(mean_width) and _finite(mean_length) and mean_width > mean_length:
+            mean_width, mean_length = mean_length, mean_width
+
+        xs = _smooth_series([float(row["xCenter_raw"]) for row in rows], quality, f"trackId={track_id}")
+        ys = _smooth_series([float(row["yCenter_raw"]) for row in rows], quality, f"trackId={track_id}")
+        frames = [int(row["frame"]) for row in rows]
+        headings = _compute_heading(xs, ys, rows, frame_rate, logger, f"trackId={track_id}")
+        x_vel = _differentiate(xs, frames, frame_rate)
+        y_vel = _differentiate(ys, frames, frame_rate)
+        x_acc = _differentiate(x_vel, frames, frame_rate)
+        y_acc = _differentiate(y_vel, frames, frame_rate)
+
+        for lifetime, (row, x, y, heading, vx, vy, ax, ay) in enumerate(zip(rows, xs, ys, headings, x_vel, y_vel, x_acc, y_acc), start=1):
+            theta = math.radians(heading)
+            lon_v = vx * math.sin(theta) + vy * math.cos(theta)
+            lat_v = vx * (-math.cos(theta)) + vy * math.sin(theta)
+            lon_a = ax * math.sin(theta) + ay * math.cos(theta)
+            lat_a = ax * (-math.cos(theta)) + ay * math.sin(theta)
+            tracks_rows.append(
+                {
+                    "trackId": track_id,
+                    "lane_id": int(row.get("lane_id", -1)) if _finite(row.get("lane_id", -1)) else -1,
+                    "frame": int(row["frame"]),
+                    "trackLifetime": lifetime,
+                    "xCenter": x,
+                    "yCenter": y,
+                    "heading": heading,
+                    "width": mean_width,
+                    "length": mean_length,
+                    "xVelocity": vx,
+                    "yVelocity": vy,
+                    "xAcceleration": ax,
+                    "yAcceleration": ay,
+                    "lonVelocity": lon_v,
+                    "latVelocity": lat_v,
+                    "lonAcceleration": lon_a,
+                    "latAcceleration": lat_a,
+                    "centerX": x,
+                    "centerY": y,
+                }
+            )
+
+        tracks_meta.append(
+            {
+                "trackId": track_id,
+                "initialFrame": frames[0],
+                "finalFrame": frames[-1],
+                "numFrames": len(rows),
+                "startXCenter": xs[0],
+                "startYCenter": ys[0],
+                "endXCenter": xs[-1],
+                "endYCenter": ys[-1],
+                "startLaneId": int(rows[0].get("lane_id", -1)) if _finite(rows[0].get("lane_id", -1)) else -1,
+                "endLaneId": int(rows[-1].get("lane_id", -1)) if _finite(rows[-1].get("lane_id", -1)) else -1,
+                "width": mean_width,
+                "length": mean_length,
+                "class": final_class,
+                "_class_counts": item["class_counts"],
+                "_final_class_ratio": item["final_class_ratio"],
+                "_category_unstable": item["category_unstable"],
+            }
+        )
+
+    return tracks_meta, tracks_rows
+
+
+def _num_frames(video_info: Dict[str, Any], frame_meta: Dict[int, Dict[str, Any]], logger: logging.Logger) -> int:
+    total = _safe_float(video_info.get("total_frames"))
+    if total is not None:
+        return int(round(total))
+    frames = sorted(frame_meta)
+    if not frames:
+        return 0
+    if frames[0] == 0:
+        return frames[-1] + 1
+    if frames[0] == 1:
+        return frames[-1]
+    logger.warning("Frame start is neither 0 nor 1; numFrames inferred as max(frame)+1.")
+    return frames[-1] + 1
+
+
+def _quality_template() -> Dict[str, Any]:
     return {
-        "dataset_id": dataset_id,
-        "version": version,
-        "display_name": f"{dataset_id} / {version}",
-        "fps": fps,
-        "total_frames": len(frame_meta),
-        "image_width": image_width,
-        "image_height": image_height,
-        "background_image": background_image_name,
-        "source_folder": source_folder,
-        "converted_time": _dt.datetime.now().isoformat(timespec="seconds"),
-        "detection_pkl": det_pkl.name,
-        "stabilization_pkl": stab_pkl.name if stab_pkl else None,
-        "row_count": len(records),
-        "object_count": len(object_ids),
-        "full_object_count": len(object_metrics),
-        "filtered_object_count": len(filtered_object_ids),
-        "filtered_object_ids": filtered_object_ids,
-        "class_names": sorted({record["class_name"] for record in records if record.get("class_name")}),
-        "traj_info_array_columns": {str(k): v for k, v in sorted(column_counts.items())},
-        "coordinate_system": (
-            "Pixel columns are copied from det_bbox_result traj_info and scaled to the displayed canvas. "
-            "q1..q4 preserve the oriented bounding box; x1..y2 are the horizontal envelope."
-        ),
-        "column_mapping": {
-            "0:8": "q1_x,q1_y,q2_x,q2_y,q3_x,q3_y,q4_x,q4_y pixel oriented bbox",
-            "8": "confidence",
-            "9": "category_id mapped to class_name",
-            "10": "object_id / track_id",
-            "11:19": "world_q1..world_q4 coordinates when present",
-            "19": "lane_id when present",
-        },
-        "static_gate": static_gate,
-        "pkl_structure": pkl_structure,
-        "stabilization_structure": inspect_stabilization_pkl(stab_pkl) if stab_pkl else None,
-        "warnings": warnings,
+        "warnings": [],
+        "raw_object_category_jump_count": 0,
+        "category_jump_tracks": [],
+        "category_unstable_tracks": [],
+        "gap_tracks": set(),
+        "short_gap_count": 0,
+        "medium_gap_count": 0,
+        "long_gap_count": 0,
+        "interpolated_frame_count": 0,
+        "outlier_frame_count": 0,
+        "split_track_count": 0,
+        "stitched_track_count": 0,
+        "size_outlier_frame_count": 0,
+        "short_tracks": [],
     }
+
+
+def _summarize_track_set(tracks_meta: List[Dict[str, Any]]) -> Dict[str, Any]:
+    class_counts = {cls: 0 for cls in ALL_CLASSES}
+    for row in tracks_meta:
+        if row["class"] in class_counts:
+            class_counts[row["class"]] += 1
+    return {
+        "numTracks": len(tracks_meta),
+        "numVehicles": sum(1 for row in tracks_meta if row["class"] in VEHICLE_CLASSES),
+        "numVRUs": sum(1 for row in tracks_meta if row["class"] in VRU_CLASSES),
+        "classTrackCounts": class_counts,
+    }
+
+
+def _build_recording_meta(
+    recording_id: str,
+    location_id: str,
+    frame_rate: float,
+    num_frames: int,
+    ortho: Optional[float],
+    summary: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    duration = num_frames / frame_rate if frame_rate else math.nan
+    return [
+        {
+            "recordingId": recording_id,
+            "locationId": location_id,
+            "frameRate": frame_rate,
+            "numFrames": num_frames,
+            "duration": duration,
+            "numTracks": summary["numTracks"],
+            "numVehicles": summary["numVehicles"],
+            "numVRUs": summary["numVRUs"],
+            "classTrackCounts": json.dumps(summary["classTrackCounts"], ensure_ascii=False, separators=(",", ":")),
+            "orthoPxToMeter": ortho,
+        }
+    ]
+
+
+def _track_motion_metrics(track_meta: Dict[str, Any], rows: List[Dict[str, Any]], frame_rate: float) -> Dict[str, Any]:
+    sorted_rows = sorted(rows, key=lambda item: int(item["frame"]))
+    points = [(float(row["xCenter"]), float(row["yCenter"])) for row in sorted_rows]
+    frames = [int(row["frame"]) for row in sorted_rows]
+    if len(points) < 2:
+        displacement = 0.0
+        path_length = 0.0
+        mean_speed = 0.0
+        max_speed = 0.0
+        static_ratio = 1.0
+    else:
+        displacement = _dist(points[0], points[-1])
+        segment_distances = [_dist(a, b) for a, b in zip(points[:-1], points[1:])]
+        path_length = float(sum(segment_distances))
+        segment_speeds = []
+        for dist, f0, f1 in zip(segment_distances, frames[:-1], frames[1:]):
+            dt = max((f1 - f0) / frame_rate, 1.0 / frame_rate)
+            segment_speeds.append(dist / dt)
+        elapsed = max((frames[-1] - frames[0]) / frame_rate, 1.0 / frame_rate)
+        mean_speed = path_length / elapsed
+        max_speed = max(segment_speeds) if segment_speeds else 0.0
+        threshold = float(STATIC_GATE["per_frame_motion_threshold"])
+        static_ratio = sum(1 for dist in segment_distances if dist <= threshold) / float(len(segment_distances))
+
+    signals = []
+    if displacement <= float(STATIC_GATE["max_displacement"]):
+        signals.append("low_displacement")
+    if mean_speed <= float(STATIC_GATE["max_mean_speed"]):
+        signals.append("low_mean_speed")
+    if static_ratio >= float(STATIC_GATE["static_ratio_threshold"]):
+        signals.append("high_static_ratio")
+
+    cls = track_meta["class"]
+    is_static = (
+        cls in set(STATIC_GATE["filter_classes"])
+        and int(track_meta["numFrames"]) >= int(STATIC_GATE["min_track_length"])
+        and len(signals) >= 2
+    )
+    return {
+        "trackId": int(track_meta["trackId"]),
+        "class": cls,
+        "start_frame": int(track_meta["initialFrame"]),
+        "end_frame": int(track_meta["finalFrame"]),
+        "total_frames": int(track_meta["numFrames"]),
+        "start_x": float(track_meta["startXCenter"]),
+        "start_y": float(track_meta["startYCenter"]),
+        "end_x": float(track_meta["endXCenter"]),
+        "end_y": float(track_meta["endYCenter"]),
+        "displacement": displacement,
+        "path_length": path_length,
+        "mean_speed": mean_speed,
+        "max_speed": max_speed,
+        "static_ratio": static_ratio,
+        "is_static": is_static,
+        "filter_reason": ",".join(signals) if is_static else "",
+    }
+
+
+def _moving_filtered_tracks(
+    tracks_meta: List[Dict[str, Any]],
+    tracks_rows: List[Dict[str, Any]],
+    frame_rate: float,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    rows_by_track: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for row in tracks_rows:
+        rows_by_track[int(row["trackId"])].append(row)
+
+    metrics_by_track = {
+        int(meta["trackId"]): _track_motion_metrics(meta, rows_by_track.get(int(meta["trackId"]), []), frame_rate)
+        for meta in tracks_meta
+    }
+    filtered_ids = {track_id for track_id, metrics in metrics_by_track.items() if metrics["is_static"]}
+    kept_meta_old = [meta for meta in tracks_meta if int(meta["trackId"]) not in filtered_ids]
+    kept_meta_old.sort(key=lambda item: (int(item["initialFrame"]), int(item["trackId"])))
+    id_map = {int(meta["trackId"]): new_id for new_id, meta in enumerate(kept_meta_old, start=1)}
+
+    filtered_meta = []
+    for meta in kept_meta_old:
+        item = dict(meta)
+        item["trackId"] = id_map[int(meta["trackId"])]
+        filtered_meta.append(item)
+
+    filtered_rows = []
+    for row in tracks_rows:
+        old_id = int(row["trackId"])
+        if old_id in filtered_ids:
+            continue
+        item = dict(row)
+        item["trackId"] = id_map[old_id]
+        filtered_rows.append(item)
+    filtered_rows.sort(key=lambda item: (int(item["trackId"]), int(item["frame"])))
+
+    gate_report = {
+        "parameters": STATIC_GATE,
+        "original_track_count": len(tracks_meta),
+        "filtered_track_count": len(filtered_ids),
+        "kept_track_count": len(filtered_meta),
+        "filtered_tracks": [metrics_by_track[track_id] for track_id in sorted(filtered_ids)],
+        "all_track_metrics": [metrics_by_track[track_id] for track_id in sorted(metrics_by_track)],
+    }
+    return filtered_meta, filtered_rows, gate_report
 
 
 def _write_dataset_version(
     version_dir: Path,
-    dataset_id: str,
-    version: str,
-    records: List[Dict[str, Any]],
-    frame_meta: Dict[int, Dict[str, Any]],
-    image_width: Optional[int],
-    image_height: Optional[int],
-    background_src: Optional[Path],
-    background_image_name: Optional[str],
-    source_folder: str,
-    fps: float,
-    det_pkl: Path,
-    stab_pkl: Optional[Path],
-    column_counts: Counter[int],
-    warnings: List[str],
-    pkl_structure: Dict[str, Any],
-    object_metrics: Dict[int, Dict[str, Any]],
-    static_gate: Dict[str, Any],
-    filtered_object_ids: List[int],
-) -> Dict[str, Any]:
+    folder_name: str,
+    recording_meta: List[Dict[str, Any]],
+    tracks_meta: List[Dict[str, Any]],
+    tracks_rows: List[Dict[str, Any]],
+    report: Dict[str, Any],
+    log_lines: List[str],
+) -> Dict[str, str]:
     version_dir.mkdir(parents=True, exist_ok=True)
-    if background_src and background_image_name:
-        shutil.copy2(background_src, version_dir / background_image_name)
+    rec_path = version_dir / f"{folder_name}_recordingMeta.csv"
+    meta_path = version_dir / f"{folder_name}_tracksMeta.csv"
+    tracks_path = version_dir / f"{folder_name}_tracks.csv"
+    _write_csv(rec_path, RECORDING_META_FIELDS, recording_meta)
+    _write_csv(meta_path, TRACKS_META_FIELDS, tracks_meta)
+    _write_csv(tracks_path, TRACKS_FIELDS, tracks_rows)
+    with (version_dir / "quality_report.json").open("w", encoding="utf-8") as fh:
+        json.dump(report, fh, ensure_ascii=False, indent=2)
+    with (version_dir / "conversion_log.txt").open("w", encoding="utf-8") as fh:
+        fh.write("\n".join(log_lines) + "\n")
+    return {
+        "recordingMeta": str(rec_path),
+        "tracksMeta": str(meta_path),
+        "tracks": str(tracks_path),
+        "qualityReport": str(version_dir / "quality_report.json"),
+        "conversionLog": str(version_dir / "conversion_log.txt"),
+    }
 
-    track_fields = CORE_TRACK_FIELDS + EXTRA_TRACK_FIELDS
-    object_fields = [
-        "dataset_id",
-        "object_id",
-        "class_name",
-        "start_frame",
-        "end_frame",
-        "total_frames",
-        "mean_confidence",
-        "start_cx",
-        "start_cy",
-        "end_cx",
-        "end_cy",
-        "displacement",
-        "path_length",
-        "mean_speed",
-        "max_speed",
-        "static_ratio",
-        "is_static",
-        "filter_reason",
-    ]
 
-    _write_csv(version_dir / "tracks.csv", track_fields, records)
-    _write_csv(version_dir / "objects.csv", object_fields, _object_records(dataset_id, records, object_metrics))
-    _write_csv(
-        version_dir / "frames.csv",
-        ["dataset_id", "frame_id", "timestamp", "width", "height", "num_objects", "output_frame"],
-        _frame_records(dataset_id, frame_meta, records, image_width, image_height),
-    )
-
-    metadata = _version_metadata(
-        dataset_id,
-        version,
-        records,
-        frame_meta,
-        image_width,
-        image_height,
-        background_image_name,
-        source_folder,
-        fps,
-        det_pkl,
-        stab_pkl,
-        column_counts,
-        warnings,
-        pkl_structure,
-        object_metrics,
-        static_gate,
-        filtered_object_ids,
-    )
-    with (version_dir / "metadata.json").open("w", encoding="utf-8") as fh:
-        json.dump(metadata, fh, ensure_ascii=False, indent=2)
-    return metadata
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, set):
+        return sorted(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    return value
 
 
 def convert_dataset(
@@ -676,197 +1030,200 @@ def convert_dataset(
 ) -> Dict[str, Any]:
     logger = logger or configure_logger()
     dataset_dir = Path(dataset_dir).resolve()
-    dataset_id = dataset_dir.name
-    output_dir = output_root / dataset_id
-    full_dir = output_dir / "full"
-    moving_dir = output_dir / "moving_filtered"
+    folder_name = dataset_dir.name
+    output_dir = Path(output_root) / folder_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_log_lines: List[str] = []
+    quality = _quality_template()
 
-    if (
-        (full_dir / "metadata.json").exists()
-        and (full_dir / "tracks.csv").exists()
-        and (moving_dir / "metadata.json").exists()
-        and (moving_dir / "tracks.csv").exists()
-        and not force
-    ):
-        logger.info("Skip %s because full and moving_filtered versions already exist.", dataset_id)
-        return {"dataset_id": dataset_id, "status": "skipped", "warnings": []}
+    def log_line(level: str, message: str) -> None:
+        dataset_log_lines.append(f"[{level}] {message}")
+        if level == "WARNING":
+            logger.warning(message)
+            quality["warnings"].append(message)
+        else:
+            logger.info(message)
 
-    warnings: List[str] = []
+    recording_id, location_id = _parse_folder_identity(folder_name, quality["warnings"])
+    log_line("INFO", f"input_folder={dataset_dir}")
+    log_line("INFO", f"recordingId={recording_id}, locationId={location_id}")
+
     det_pkl = _find_detection_pkl(dataset_dir)
     if det_pkl is None:
-        raise ConversionError(f"No det_bbox_result_*.pkl or equivalent detection pkl found in {dataset_dir}.")
-
+        raise ConversionError(f"No det_bbox_result_*.pkl found in {dataset_dir}.")
     stab_pkl = _find_stabilization_pkl(dataset_dir)
-    background_src, bg_warnings = _find_background(dataset_dir)
-    warnings.extend(bg_warnings)
-
-    logger.info("Converting dataset %s from %s", dataset_id, dataset_dir)
-    logger.info("Using detection pkl: %s", det_pkl.name)
+    log_line("INFO", f"detection_pkl={det_pkl.name}")
     if stab_pkl:
-        logger.info("Found stabilization pkl: %s", stab_pkl.name)
-    for warning in warnings:
-        logger.warning("%s: %s", dataset_id, warning)
+        log_line("INFO", f"stabilization_pkl={stab_pkl.name} (not used for dynamics)")
 
     with det_pkl.open("rb") as fh:
         data = pickle.load(fh)
     if not isinstance(data, dict):
-        raise ConversionError(f"{det_pkl.name} must contain a dict, got {type(data).__name__}.")
-    traj_info = data.get("traj_info")
-    if not isinstance(traj_info, list):
-        raise ConversionError(f"{det_pkl.name} missing list field 'traj_info'.")
-    if not traj_info:
-        raise ConversionError(f"{det_pkl.name} has empty 'traj_info'.")
+        raise ConversionError(f"{det_pkl.name} must contain a dict.")
 
     video_info = _video_info(data)
     output_info = data.get("output_info", {}) if isinstance(data.get("output_info"), dict) else {}
-    fps = _safe_float(output_info.get("output_fps")) or _safe_float(video_info.get("fps")) or 10.0
-
-    image_width, image_height = _image_size(background_src)
-    image_width = image_width or int(video_info.get("width") or 0) or None
-    image_height = image_height or int(video_info.get("height") or 0) or None
-
-    records: List[Dict[str, Any]] = []
-    frame_meta: Dict[int, Dict[str, Any]] = {}
-    column_counts: Counter[int] = Counter()
-    row_errors: List[str] = []
-    for entry in traj_info:
-        frame_id, output_frame, arr, frame_time = _format_entry(entry)
-        ts = _timestamp(frame_id, frame_time, fps)
-        frame_meta.setdefault(frame_id, {"output_frame": output_frame, "timestamp": ts})
-        if arr is None:
-            warnings.append(f"Frame {frame_id} has None detection array.")
-            continue
-        arr = np.asarray(arr)
-        if arr.size == 0:
-            continue
-        if arr.ndim != 2:
-            raise ConversionError(f"Frame {frame_id} detection array must be 2D, got shape {arr.shape}.")
-        column_counts[arr.shape[1]] += 1
-        infer_detection_columns(arr.shape[1])
-        for row_index, row in enumerate(arr):
-            try:
-                records.append(_make_track_record(dataset_id, frame_id, output_frame, ts, row, row_index))
-            except ConversionError as exc:
-                row_errors.append(str(exc))
-                if len(row_errors) > 20:
-                    raise ConversionError("Too many row conversion errors; first errors: " + "; ".join(row_errors[:20]))
-
-    if row_errors:
-        warnings.extend(row_errors[:20])
-        logger.warning("%s row warnings: %s", dataset_id, "; ".join(row_errors[:5]))
-    if not records:
-        raise ConversionError(f"No valid track records found in {det_pkl.name}.")
-
-    if force:
-        for version_dir in (full_dir, moving_dir):
-            if version_dir.exists():
-                shutil.rmtree(version_dir)
-        for legacy_name in ("tracks.csv", "objects.csv", "frames.csv", "metadata.json", "background.jpg"):
-            legacy_path = output_dir / legacy_name
-            if legacy_path.exists() and legacy_path.is_file():
-                legacy_path.unlink()
-
-    background_image_name = None
-    if background_src:
-        background_image_name = "background.jpg"
-
-    try:
-        source_rel = dataset_dir.relative_to(initial_root.resolve())
-        if initial_root.resolve() == DEFAULT_INITIAL_ROOT.resolve():
-            source_folder = str(Path("Visualization") / "Initial results" / source_rel)
-        else:
-            source_folder = str(dataset_dir)
-    except ValueError:
-        source_folder = str(dataset_dir)
-
-    static_gate = dict(STATIC_GATE_CONFIG)
-    object_metrics = _compute_object_metrics(records, static_gate)
-    filtered_object_ids = sorted(
-        object_id for object_id, metrics in object_metrics.items() if metrics.get("is_static")
+    frame_rate = _safe_float(output_info.get("output_fps")) or 29.97
+    log_line(
+        "INFO",
+        "video_info width=%s height=%s fps=%s total_frames=%s"
+        % (video_info.get("width"), video_info.get("height"), video_info.get("fps"), video_info.get("total_frames")),
     )
-    filtered_set = set(filtered_object_ids)
-    moving_records = [record for record in records if int(record["object_id"]) not in filtered_set]
+    log_line("INFO", f"frameRate={frame_rate}")
 
-    for object_id in filtered_object_ids:
-        metrics = object_metrics[object_id]
-        logger.info(
-            "%s moving_filtered removes object_id=%s class=%s frames=%s displacement=%.3f "
-            "path_length=%.3f mean_speed=%.3f max_speed=%.3f static_ratio=%.3f reason=%s",
-            dataset_id,
-            object_id,
-            metrics["class_name"],
-            metrics["total_frames"],
-            metrics["displacement"],
-            metrics["path_length"],
-            metrics["mean_speed"],
-            metrics["max_speed"],
-            metrics["static_ratio"],
-            metrics["filter_reason"],
+    raw_rows, frame_meta, col_counts = _expand_traj_info(data, logger, quality)
+    if not raw_rows:
+        raise ConversionError("No valid world-coordinate trajectory rows found.")
+    raw_object_count = len({row["object_id"] for row in raw_rows})
+    log_line("INFO", f"raw_object_id_count={raw_object_count}")
+
+    fragments = _split_raw_tracks(raw_rows, frame_rate, logger, quality)
+    tracks_meta, tracks_rows = _build_final_tracks(fragments, frame_rate, logger, quality)
+    for row in tracks_meta:
+        row["recordingId"] = recording_id
+    for row in tracks_rows:
+        row["recordingId"] = recording_id
+
+    num_frames = _num_frames(video_info, frame_meta, logger)
+    ortho = _estimate_ortho_px_to_meter(raw_rows, logger)
+    if ortho is None:
+        log_line("WARNING", "orthoPxToMeter could not be estimated reliably; output is empty.")
+    else:
+        log_line("INFO", f"orthoPxToMeter={ortho:.6f}")
+
+    full_summary = _summarize_track_set(tracks_meta)
+    full_recording_meta = _build_recording_meta(recording_id, location_id, frame_rate, num_frames, ortho, full_summary)
+    moving_meta, moving_rows, static_gate_report = _moving_filtered_tracks(tracks_meta, tracks_rows, frame_rate)
+    moving_summary = _summarize_track_set(moving_meta)
+    moving_recording_meta = _build_recording_meta(recording_id, location_id, frame_rate, num_frames, ortho, moving_summary)
+
+    log_line("INFO", f"final_track_count={full_summary['numTracks']}")
+    log_line("INFO", f"classTrackCounts={full_summary['classTrackCounts']}")
+    log_line("INFO", "output_versions=full,moving_filtered")
+    log_line("INFO", f"static_gate_parameters={STATIC_GATE}")
+    log_line(
+        "INFO",
+        "moving_filtered original_tracks=%s filtered_tracks=%s kept_tracks=%s"
+        % (
+            static_gate_report["original_track_count"],
+            static_gate_report["filtered_track_count"],
+            static_gate_report["kept_track_count"],
+        ),
+    )
+    for item in static_gate_report["filtered_tracks"]:
+        log_line(
+            "INFO",
+            "static_filtered trackId=%s class=%s frames=%s displacement=%.4f path_length=%.4f "
+            "mean_speed=%.4f static_ratio=%.4f reason=%s"
+            % (
+                item["trackId"],
+                item["class"],
+                item["total_frames"],
+                item["displacement"],
+                item["path_length"],
+                item["mean_speed"],
+                item["static_ratio"],
+                item["filter_reason"],
+            ),
         )
+    log_line("INFO", f"category_jump_object_count={quality['raw_object_category_jump_count']}")
+    log_line("INFO", f"category_jump_final_track_count={len(quality['category_jump_tracks'])}")
+    for item in quality["category_jump_tracks"]:
+        log_line(
+            "INFO",
+            "category_jump detail track=%s class_counts=%s final_class=%s final_class_ratio=%.4f"
+            % (item["track"], item["class_counts"], item["final_class"], item["final_class_ratio"]),
+        )
+    log_line("INFO", f"category_unstable_track_count={len(quality['category_unstable_tracks'])}")
+    for item in quality["category_unstable_tracks"]:
+        log_line(
+            "WARNING",
+            "category_unstable detail track=%s class_counts=%s final_class=%s final_class_ratio=%.4f"
+            % (item["track"], item["class_counts"], item["final_class"], item["final_class_ratio"]),
+        )
+    log_line("INFO", f"lane_id_minus_one_records={quality.get('lane_id_minus_one_records', 0)}")
+    log_line("INFO", f"gap_track_count={len(quality['gap_tracks'])}")
+    log_line("INFO", f"short_gap_missing_frames={quality['short_gap_count']}")
+    log_line("INFO", f"medium_gap_missing_frames={quality['medium_gap_count']}")
+    log_line("INFO", f"long_gap_missing_frames={quality['long_gap_count']}")
+    log_line("INFO", f"interpolated_frame_count={quality['interpolated_frame_count']}")
+    log_line("INFO", f"outlier_frame_count={quality['outlier_frame_count']}")
+    log_line("INFO", f"split_track_count={quality['split_track_count']}")
+    log_line("INFO", f"stitched_track_count={quality['stitched_track_count']}")
+    log_line("INFO", f"size_outlier_frame_count={quality['size_outlier_frame_count']}")
+    log_line("INFO", f"valid_size_rows_used≈{sum(row['numFrames'] for row in tracks_meta) - quality['size_outlier_frame_count']}")
+    log_line("INFO", f"short_track_count={len(quality['short_tracks'])}")
+    if quality["short_tracks"]:
+        log_line("WARNING", f"short_tracks={quality['short_tracks'][:50]}")
+    log_line("INFO", f"unknown_category_ids={quality.get('unknown_category_ids', [])}")
 
-    pkl_structure = inspect_pkl_structure(det_pkl)
-    full_metadata = _write_dataset_version(
-        full_dir,
-        dataset_id,
-        "full",
-        records,
-        frame_meta,
-        image_width,
-        image_height,
-        background_src,
-        background_image_name,
-        source_folder,
-        fps,
-        det_pkl,
-        stab_pkl,
-        column_counts,
-        warnings,
-        pkl_structure,
-        object_metrics,
-        static_gate,
-        [],
+    base_report = {
+        "folderName": folder_name,
+        "recordingId": recording_id,
+        "locationId": location_id,
+        "detectionPkl": str(det_pkl),
+        "stabilizationPkl": str(stab_pkl) if stab_pkl else None,
+        "videoInfo": video_info,
+        "outputInfo": output_info,
+        "frameRate": frame_rate,
+        "arrayColumnCounts": dict(col_counts),
+        "rawObjectCount": raw_object_count,
+        "orthoPxToMeter": ortho,
+        "quality": _json_safe(quality),
+        "staticGate": _json_safe(static_gate_report),
+    }
+
+    full_report = dict(base_report)
+    full_report.update(
+        {
+            "version": "full",
+            "finalTrackCount": full_summary["numTracks"],
+            "classTrackCounts": full_summary["classTrackCounts"],
+            "numVehicles": full_summary["numVehicles"],
+            "numVRUs": full_summary["numVRUs"],
+        }
     )
-    moving_metadata = _write_dataset_version(
-        moving_dir,
-        dataset_id,
-        "moving_filtered",
-        moving_records,
-        frame_meta,
-        image_width,
-        image_height,
-        background_src,
-        background_image_name,
-        source_folder,
-        fps,
-        det_pkl,
-        stab_pkl,
-        column_counts,
-        warnings,
-        pkl_structure,
-        object_metrics,
-        static_gate,
-        filtered_object_ids,
+    moving_report = dict(base_report)
+    moving_report.update(
+        {
+            "version": "moving_filtered",
+            "finalTrackCount": moving_summary["numTracks"],
+            "classTrackCounts": moving_summary["classTrackCounts"],
+            "numVehicles": moving_summary["numVehicles"],
+            "numVRUs": moving_summary["numVRUs"],
+        }
     )
 
-    logger.info(
-        "Converted %s full: %s rows, %s objects, %s frames",
-        dataset_id,
-        full_metadata["row_count"],
-        full_metadata["object_count"],
-        len(frame_meta),
-    )
-    logger.info(
-        "Converted %s moving_filtered: %s rows, %s kept objects, %s filtered objects",
-        dataset_id,
-        moving_metadata["row_count"],
-        moving_metadata["object_count"],
-        moving_metadata["filtered_object_count"],
-    )
+    version_outputs = {
+        "full": _write_dataset_version(output_dir / "full", folder_name, full_recording_meta, tracks_meta, tracks_rows, full_report, dataset_log_lines),
+        "moving_filtered": _write_dataset_version(
+            output_dir / "moving_filtered",
+            folder_name,
+            moving_recording_meta,
+            moving_meta,
+            moving_rows,
+            moving_report,
+            dataset_log_lines,
+        ),
+    }
+
     return {
-        "dataset_id": dataset_id,
+        "dataset_id": folder_name,
         "status": "converted",
-        "warnings": warnings,
-        "versions": {"full": full_metadata, "moving_filtered": moving_metadata},
+        "recordingId": recording_id,
+        "locationId": location_id,
+        "numTracks": full_summary["numTracks"],
+        "versions": {
+            "full": {
+                "numTracks": full_summary["numTracks"],
+                "outputs": version_outputs["full"],
+            },
+            "moving_filtered": {
+                "numTracks": moving_summary["numTracks"],
+                "filteredTracks": static_gate_report["filtered_track_count"],
+                "outputs": version_outputs["moving_filtered"],
+            },
+        },
     }
 
 
@@ -874,11 +1231,7 @@ def find_dataset_dirs(source_root: Path) -> List[Path]:
     source_root = Path(source_root)
     if not source_root.exists():
         return []
-    dirs = []
-    for child in sorted(source_root.iterdir()):
-        if child.is_dir() and any(child.glob("*.pkl")):
-            dirs.append(child)
-    return dirs
+    return [child for child in sorted(source_root.iterdir()) if child.is_dir() and any(child.glob("*.pkl"))]
 
 
 def convert_all(
@@ -901,21 +1254,37 @@ def convert_all(
         except Exception as exc:
             logger.exception("Failed to convert %s", dataset_dir.name)
             results.append({"dataset_id": dataset_dir.name, "status": "failed", "error": str(exc)})
-    return {
-        "source_root": str(source_root),
-        "output_root": str(output_root),
-        "force": force,
-        "results": results,
-    }
+    return {"source_root": str(source_root), "output_root": str(output_root), "force": force, "results": results}
+
+
+def inspect_pkl_structure(pkl_path: Path) -> Dict[str, Any]:
+    with pkl_path.open("rb") as fh:
+        data = pickle.load(fh)
+    if not isinstance(data, dict):
+        return {"path": str(pkl_path), "type": type(data).__name__}
+    summary = {"path": str(pkl_path), "top_level_keys": list(data.keys())}
+    traj = data.get("traj_info")
+    if isinstance(traj, list):
+        summary["traj_info_length"] = len(traj)
+        col_counts = Counter()
+        for entry in traj:
+            try:
+                _, _, arr, _ = _format_entry(entry)
+            except Exception:
+                continue
+            if isinstance(arr, np.ndarray):
+                col_counts[arr.shape[1] if arr.ndim == 2 else arr.shape[0]] += 1
+        summary["array_column_count_frequencies"] = dict(col_counts)
+    return summary
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert OpenVTER pkl result folders to visualization CSV datasets.")
+    parser = argparse.ArgumentParser(description="Convert OpenVTER pkl result folders to standardized trajectory CSV files.")
     parser.add_argument("--source-root", default=str(DEFAULT_INITIAL_ROOT), help="Folder containing raw result subfolders.")
     parser.add_argument("--output-root", default=str(DEFAULT_ADJUSTED_ROOT), help="Folder for standardized CSV datasets.")
-    parser.add_argument("--force", action="store_true", help="Overwrite converted datasets.")
+    parser.add_argument("--force", action="store_true", help="Re-run conversion.")
     parser.add_argument("--datasets", nargs="*", default=None, help="Only convert these dataset folder names.")
-    parser.add_argument("--inspect", default=None, help="Only inspect a detection pkl and print its structure JSON.")
+    parser.add_argument("--inspect", default=None, help="Only inspect a detection pkl and print structure JSON.")
     args = parser.parse_args()
 
     logger = configure_logger()

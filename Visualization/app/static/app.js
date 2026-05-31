@@ -13,13 +13,32 @@ const CATEGORY_STYLES = {
 };
 
 const DEFAULT_STYLE = { color: "#475467", shape: "rect", weight: 2 };
+const LANE_PALETTE = [
+  "#2dd4bf",
+  "#60a5fa",
+  "#fbbf24",
+  "#a78bfa",
+  "#34d399",
+  "#fb7185",
+  "#38bdf8",
+  "#f472b6",
+  "#a3e635",
+  "#f97316",
+  "#818cf8",
+  "#14b8a6",
+  "#eab308",
+  "#22c55e",
+  "#06b6d4",
+  "#c084fc",
+];
+const ROAD_MASK_COLOR = "rgba(0, 0, 0, 0.88)";
 const DEFAULT_TRAIL_LENGTH = 50;
 const HEADING_CONFIG = {
   heading_smooth_window: 8,
   min_motion_threshold: 2.0,
-  arrow_length_scale: 0.8,
-  arrow_min_length: 8,
-  arrow_max_length: 40,
+  arrow_length_scale: 1.0,
+  arrow_min_length: 6,
+  arrow_max_length: 160,
 };
 
 const state = {
@@ -31,6 +50,7 @@ const state = {
   objects: [],
   objectInfoMap: new Map(),
   frames: [],
+  laneGeometry: { available: false, shapes: [] },
   frameMap: new Map(),
   objectMap: new Map(),
   headingCache: new Map(),
@@ -45,6 +65,7 @@ const state = {
   trailLength: DEFAULT_TRAIL_LENGTH,
   objectFilter: "",
   selectedObject: null,
+  hoveredLaneKey: null,
   background: null,
   lastTick: 0,
   frameAccumulator: 0,
@@ -66,6 +87,8 @@ const els = {
   classFilters: document.getElementById("classFilters"),
   bboxToggle: document.getElementById("bboxToggle"),
   labelToggle: document.getElementById("labelToggle"),
+  laneToggle: document.getElementById("laneToggle"),
+  keepUnrelatedToggle: document.getElementById("keepUnrelatedToggle"),
   trailRange: document.getElementById("trailRange"),
   trailValue: document.getElementById("trailValue"),
   frameMetric: document.getElementById("frameMetric"),
@@ -154,10 +177,15 @@ async function loadDataset(datasetId, version) {
   state.datasetId = datasetId;
   state.version = version;
   state.metadata = await api(`/api/datasets/${encodeURIComponent(datasetId)}/${encodeURIComponent(version)}/metadata`);
-  const [tracks, frames, objects] = await Promise.all([
+  const [tracks, frames, objects, lanes] = await Promise.all([
     api(`/api/datasets/${encodeURIComponent(datasetId)}/${encodeURIComponent(version)}/tracks`),
     api(`/api/datasets/${encodeURIComponent(datasetId)}/${encodeURIComponent(version)}/frames`),
     api(`/api/datasets/${encodeURIComponent(datasetId)}/${encodeURIComponent(version)}/objects`),
+    api(`/api/datasets/${encodeURIComponent(datasetId)}/${encodeURIComponent(version)}/lanes`).catch((err) => ({
+      available: false,
+      reason: String(err.message || err),
+      shapes: [],
+    })),
   ]);
 
   state.tracks = tracks.map(normalizeTrack).filter(Boolean);
@@ -170,6 +198,7 @@ async function loadDataset(datasetId, version) {
     num_objects: asNumber(row.num_objects) || 0,
   }));
   state.objects = objects.map(normalizeObject);
+  state.laneGeometry = normalizeLaneGeometry(lanes);
   buildIndexes();
   renderDatasets();
   buildClassFilters();
@@ -179,6 +208,7 @@ async function loadDataset(datasetId, version) {
   state.currentFrame = state.minFrame;
   state.objectFilter = "";
   state.selectedObject = null;
+  state.hoveredLaneKey = null;
   state.headingCache = new Map();
   els.objectInput.value = "";
   els.frameInput.value = "";
@@ -231,7 +261,27 @@ function normalizeObject(row) {
     mean_speed: asNumber(row.mean_speed),
     max_speed: asNumber(row.max_speed),
     static_ratio: asNumber(row.static_ratio),
+    lane_id: asNumber(row.lane_id),
+    startLaneId: asNumber(row.startLaneId),
+    endLaneId: asNumber(row.endLaneId),
     is_static: String(row.is_static).toLowerCase() === "true",
+  };
+}
+
+function normalizeLaneGeometry(lanes) {
+  const geometry = lanes || { available: false, shapes: [] };
+  const shapes = Array.isArray(geometry.shapes) ? geometry.shapes : [];
+  return {
+    ...geometry,
+    shapes: shapes.map((shape, index) => ({
+      ...shape,
+      _key: `${shape.role || "shape"}:${shape.label || ""}:${index}`,
+      points: Array.isArray(shape.points)
+        ? shape.points
+            .map((point) => ({ x: asNumber(point.x), y: asNumber(point.y) }))
+            .filter((point) => point.x !== null && point.y !== null)
+        : [],
+    })),
   };
 }
 
@@ -398,6 +448,8 @@ function draw() {
     ctx.strokeRect(box.offsetX, box.offsetY, box.width, box.height);
   }
 
+  if (els.keepUnrelatedToggle && !els.keepUnrelatedToggle.checked) drawRoadMask();
+  if (els.laneToggle.checked) drawLaneGeometry();
   const rows = visibleCurrentRows();
   drawTrails(rows);
   for (const row of rows) drawTarget(row);
@@ -523,7 +575,7 @@ function drawDirection(row, color) {
   const rad = headingFor(row);
   if (rad === null) return;
   const center = worldToScreen(row.cx, row.cy);
-  const baseLen = Math.max(row.width || 0, row.height || 0) * state.canvasBox.scaleX * HEADING_CONFIG.arrow_length_scale;
+  const baseLen = targetLongSideScreenLength(row) * HEADING_CONFIG.arrow_length_scale;
   const len = Math.max(HEADING_CONFIG.arrow_min_length, Math.min(HEADING_CONFIG.arrow_max_length, baseLen));
   const end = { x: center.x + Math.cos(rad) * len, y: center.y + Math.sin(rad) * len };
   ctx.beginPath();
@@ -541,6 +593,23 @@ function drawDirection(row, color) {
   ctx.fill();
 }
 
+function targetLongSideScreenLength(row) {
+  if (hasQuad(row)) {
+    const points = quadPoints(row).map((point) => worldToScreen(point.x, point.y));
+    const edges = points.map((point, idx) => {
+      const next = points[(idx + 1) % points.length];
+      return Math.hypot(next.x - point.x, next.y - point.y);
+    });
+    return Math.max(...edges, 0);
+  }
+  if (row.x1 !== null && row.y1 !== null && row.x2 !== null && row.y2 !== null) {
+    const a = worldToScreen(row.x1, row.y1);
+    const b = worldToScreen(row.x2, row.y2);
+    return Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+  }
+  return Math.max(row.width || 0, row.height || 0) * state.canvasBox.scaleX;
+}
+
 function drawLabel(row, center, color) {
   const text = `${row.object_id} ${row.class_name || ""}`;
   ctx.font = "12px Segoe UI, Arial";
@@ -554,6 +623,113 @@ function drawLabel(row, center, color) {
   ctx.strokeRect(x, y, width, 18);
   ctx.fillStyle = "#18202c";
   ctx.fillText(text, x + 5, y + 13);
+}
+
+function drawLaneGeometry() {
+  const shapes = state.laneGeometry && state.laneGeometry.available ? state.laneGeometry.shapes || [] : [];
+  if (!shapes.length) return;
+
+  ctx.save();
+  for (const shape of shapes.filter((item) => item.role === "road")) {
+    const points = screenPointsForShape(shape);
+    if (points.length < 2) continue;
+    tracePoints(points, true);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.03)";
+    ctx.strokeStyle = "rgba(15, 23, 42, 0.5)";
+    ctx.lineWidth = 1.4;
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  for (const shape of shapes.filter((item) => item.role === "lane")) {
+    const points = screenPointsForShape(shape);
+    if (points.length < 3) continue;
+    const color = laneColor(shape);
+    const isHovered = shape._key === state.hoveredLaneKey;
+    tracePoints(points, true);
+    ctx.fillStyle = hexToRgba(color, isHovered ? 0.34 : 0.17);
+    ctx.strokeStyle = hexToRgba(color, isHovered ? 0.98 : 0.78);
+    ctx.lineWidth = isHovered ? 3 : 1.6;
+    ctx.shadowColor = isHovered ? hexToRgba(color, 0.4) : "transparent";
+    ctx.shadowBlur = isHovered ? 10 : 0;
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    drawLaneGeometryLabel(shape, points, color, isHovered);
+  }
+
+  for (const shape of shapes.filter((item) => item.role !== "road" && item.role !== "lane")) {
+    const points = screenPointsForShape(shape);
+    if (points.length < 2) continue;
+    tracePoints(points, false);
+    ctx.strokeStyle = shape.role === "drivingline" ? "rgba(124, 58, 237, 0.88)" : "rgba(217, 119, 6, 0.86)";
+    ctx.lineWidth = shape.role === "drivingline" ? 2.2 : 1.7;
+    ctx.setLineDash(shape.role === "drivingline" ? [8, 6] : []);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+function drawRoadMask() {
+  const shapes = state.laneGeometry && state.laneGeometry.available ? state.laneGeometry.shapes || [] : [];
+  const roadShapes = shapes.filter((shape) => shape.role === "road" && (shape.points || []).length >= 3);
+  if (!roadShapes.length) return;
+
+  const box = state.canvasBox;
+  const path = new Path2D();
+  path.rect(box.offsetX, box.offsetY, box.width, box.height);
+  for (const shape of roadShapes) {
+    const points = screenPointsForShape(shape);
+    if (points.length < 3) continue;
+    points.forEach((point, index) => {
+      if (index === 0) path.moveTo(point.x, point.y);
+      else path.lineTo(point.x, point.y);
+    });
+    path.closePath();
+  }
+
+  ctx.save();
+  ctx.fillStyle = ROAD_MASK_COLOR;
+  ctx.fill(path, "evenodd");
+  ctx.restore();
+}
+
+function screenPointsForShape(shape) {
+  return (shape.points || []).map((point) => worldToScreen(point.x, point.y));
+}
+
+function tracePoints(points, closePath) {
+  ctx.beginPath();
+  points.forEach((point, idx) => {
+    if (idx === 0) ctx.moveTo(point.x, point.y);
+    else ctx.lineTo(point.x, point.y);
+  });
+  if (closePath) ctx.closePath();
+}
+
+function laneColor(shape) {
+  const laneId = asNumber(shape.lane_id);
+  if (laneId !== null) return LANE_PALETTE[Math.abs(laneId) % LANE_PALETTE.length];
+  let hash = 0;
+  const source = String(shape.label || shape._key || "");
+  for (let i = 0; i < source.length; i += 1) hash = (hash * 31 + source.charCodeAt(i)) | 0;
+  return LANE_PALETTE[Math.abs(hash) % LANE_PALETTE.length];
+}
+
+function drawLaneGeometryLabel(shape, points, color, isHovered = false) {
+  if (!shape.lane_id || !points.length) return;
+  const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+  const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+  const text = `lane_${shape.lane_id}`;
+  ctx.font = "11px Segoe UI, Arial";
+  const width = ctx.measureText(text).width + 10;
+  ctx.fillStyle = isHovered ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.78)";
+  ctx.fillRect(cx - width / 2, cy - 9, width, 18);
+  ctx.strokeStyle = hexToRgba(color, isHovered ? 0.98 : 0.68);
+  ctx.strokeRect(cx - width / 2, cy - 9, width, 18);
+  ctx.fillStyle = "#172033";
+  ctx.fillText(text, cx - width / 2 + 5, cy + 4);
 }
 
 function updateMetrics(currentCount) {
@@ -676,6 +852,39 @@ function findHitObject(clientX, clientY) {
   return best;
 }
 
+function findHitLane(clientX, clientY) {
+  if (!els.laneToggle.checked || !(state.laneGeometry && state.laneGeometry.available)) return null;
+  const rect = els.canvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  const world = screenToWorld(x, y);
+  const lanes = (state.laneGeometry.shapes || []).filter((shape) => shape.role === "lane" && (shape.points || []).length >= 3);
+  for (let i = lanes.length - 1; i >= 0; i -= 1) {
+    if (pointInPolygon(world, lanes[i].points)) return lanes[i];
+  }
+  return null;
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersects = yi > point.y !== yj > point.y && point.x < ((xj - xi) * (point.y - yi)) / (yj - yi || 1e-9) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function setHoveredLane(shape) {
+  const nextKey = shape ? shape._key : null;
+  if (state.hoveredLaneKey === nextKey) return;
+  state.hoveredLaneKey = nextKey;
+  draw();
+}
+
 function showObjectDetail(row) {
   if (!row) {
     els.detailContent.textContent = "悬停或点击目标";
@@ -687,6 +896,7 @@ function showObjectDetail(row) {
       <span>object_id</span><strong>${row.object_id}</strong>
       <span>class</span><strong>${escapeHtml(row.class_name || "")}</strong>
       <span>frame</span><strong>${row.frame_id}</strong>
+      <span>lane_id</span><strong>${row.lane_id === null ? "" : row.lane_id}</strong>
       <span>center</span><strong>${fmt(row.cx)}, ${fmt(row.cy)}</strong>
       <span>bbox</span><strong>${fmt(row.x1)}, ${fmt(row.y1)} - ${fmt(row.x2)}, ${fmt(row.y2)}</strong>
       <span>confidence</span><strong>${row.confidence === null ? "" : fmt(row.confidence, 3)}</strong>
@@ -700,16 +910,40 @@ function showObjectDetail(row) {
 function showTooltip(row, clientX, clientY) {
   if (!row) {
     els.tooltip.classList.add("hidden");
+    els.tooltip.classList.remove("lane-tooltip");
     return;
   }
+  els.tooltip.classList.remove("lane-tooltip");
   els.tooltip.innerHTML = `
     <strong>${row.object_id}</strong> ${escapeHtml(row.class_name || "")}<br>
     frame: ${row.frame_id}<br>
+    lane_id: ${row.lane_id === null ? "" : row.lane_id}<br>
     center: ${fmt(row.cx)}, ${fmt(row.cy)}<br>
     confidence: ${row.confidence === null ? "" : fmt(row.confidence, 3)}
   `;
   const wrap = els.canvasWrap.getBoundingClientRect();
   els.tooltip.style.left = `${Math.min(clientX - wrap.left + 14, wrap.width - 230)}px`;
+  els.tooltip.style.top = `${Math.max(10, clientY - wrap.top + 14)}px`;
+  els.tooltip.classList.remove("hidden");
+}
+
+function showLaneTooltip(shape, clientX, clientY) {
+  if (!shape) {
+    els.tooltip.classList.add("hidden");
+    els.tooltip.classList.remove("lane-tooltip");
+    return;
+  }
+  const color = laneColor(shape);
+  const pointCount = (shape.points || []).length;
+  els.tooltip.classList.add("lane-tooltip");
+  els.tooltip.innerHTML = `
+    <div class="tooltip-title"><span class="tooltip-swatch" style="background:${color}"></span><span>${escapeHtml(shape.label || `lane_${shape.lane_id || ""}`)}</span></div>
+    lane_id: ${shape.lane_id || ""}<br>
+    type: ${escapeHtml(shape.role || "lane")}<br>
+    points: ${pointCount}
+  `;
+  const wrap = els.canvasWrap.getBoundingClientRect();
+  els.tooltip.style.left = `${Math.min(clientX - wrap.left + 14, wrap.width - 210)}px`;
   els.tooltip.style.top = `${Math.max(10, clientY - wrap.top + 14)}px`;
   els.tooltip.classList.remove("hidden");
 }
@@ -763,14 +997,32 @@ els.timeline.addEventListener("input", () => {
 });
 els.bboxToggle.addEventListener("change", draw);
 els.labelToggle.addEventListener("change", draw);
+els.laneToggle.addEventListener("change", () => {
+  if (els.laneToggle.checked && !(state.laneGeometry && state.laneGeometry.available)) {
+    setStatus((state.laneGeometry && state.laneGeometry.reason) || "当前数据集没有可绘制的车道几何");
+  }
+  if (!els.laneToggle.checked) setHoveredLane(null);
+  draw();
+});
+els.keepUnrelatedToggle.addEventListener("change", draw);
 
 els.canvas.addEventListener("mousemove", (event) => {
+  const laneHit = findHitLane(event.clientX, event.clientY);
+  setHoveredLane(laneHit);
   const hit = findHitObject(event.clientX, event.clientY);
-  showTooltip(hit, event.clientX, event.clientY);
-  if (hit) showObjectDetail(hit);
+  if (hit) {
+    showTooltip(hit, event.clientX, event.clientY);
+    showObjectDetail(hit);
+  } else if (laneHit) {
+    showLaneTooltip(laneHit, event.clientX, event.clientY);
+  } else {
+    showTooltip(null, event.clientX, event.clientY);
+  }
 });
 els.canvas.addEventListener("mouseleave", () => {
+  setHoveredLane(null);
   els.tooltip.classList.add("hidden");
+  els.tooltip.classList.remove("lane-tooltip");
 });
 els.canvas.addEventListener("click", (event) => {
   const hit = findHitObject(event.clientX, event.clientY);

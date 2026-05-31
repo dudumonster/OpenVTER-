@@ -1,39 +1,20 @@
-# OpenVTER 轨迹可视化与 pkl 转 CSV
+# OpenVTER 轨迹 CSV 转换与可视化
 
-该目录用于把 OpenVTER 每个地点的 pkl 结果转换成标准化 CSV，并通过本地后端 + Canvas 前端查看轨迹。
-
-## 目录结构
+详细字段计算、补全、修复和平滑逻辑见：
 
 ```text
-Visualization/
-├── Initial results/
-│   └── cao_qiao_001/
-│       ├── background_cao_qiao_001.jpg
-│       ├── cao_qiao_001_stab.pkl
-│       ├── det_bbox_result_cao_qiao_001.pkl
-│       ├── first_frame_cao_qiao_001.jpg
-│       └── tracking_output_stab_det_cao_qiao_001.mp4
-├── Adjusted results/
-│   └── cao_qiao_001/
-│       ├── full/
-│       │   ├── tracks.csv
-│       │   ├── objects.csv
-│       │   ├── frames.csv
-│       │   ├── metadata.json
-│       │   └── background.jpg
-│       └── moving_filtered/
-│           ├── tracks.csv
-│           ├── objects.csv
-│           ├── frames.csv
-│           ├── metadata.json
-│           └── background.jpg
-├── logs/
-└── app/
+Visualization/DATASET_CONVERSION_DETAILS.md
 ```
 
-## 放入新数据集
+项目独立环境 `OpenVTER` 的使用说明见：
 
-把每个地点的完整结果文件夹拖入：
+```text
+Visualization/OPENVTER_ENVIRONMENT.md
+```
+
+## 放入原始结果
+
+把每个地点的项目结果文件夹放到：
 
 ```text
 Visualization/Initial results/
@@ -43,127 +24,164 @@ Visualization/Initial results/
 
 ```text
 Visualization/Initial results/cao_qiao_001/
-Visualization/Initial results/cao_qiao_002/
 ```
 
-每个子文件夹会被当作一个地点数据集。文件名不会写死为 `cao_qiao_001`，转换器会自动识别 `det_bbox_result_*.pkl`、`*_stab.pkl`、`background_*.jpg` 或 `first_frame_*.jpg`。
+常见文件包括：
+
+```text
+background_*.jpg
+first_frame_*.jpg
+det_bbox_result_*.pkl
+*_stab.pkl
+tracking_output_*.mp4
+```
+
+CSV 转换主数据源是 `det_bbox_result_*.pkl` 里的 `traj_info`。`raw_det` 只作为辅助检查，`*_stab.pkl` 不参与轨迹动力学计算。
 
 ## 执行转换
 
-在项目根目录运行：
-
-```powershell
-python "Visualization\app\converter.py"
-```
-
-覆盖已有转换结果：
+转换全部数据集：
 
 ```powershell
 python "Visualization\app\converter.py" --force
 ```
 
-只检查某个 pkl 结构：
+只转换某一个数据集：
+
+```powershell
+python "Visualization\app\converter.py" --datasets cao_qiao_001 --force
+```
+
+检查 pkl 结构：
 
 ```powershell
 python "Visualization\app\converter.py" --inspect "Visualization\Initial results\cao_qiao_001\det_bbox_result_cao_qiao_001.pkl"
 ```
 
-转换日志写入：
+总日志写入：
 
 ```text
 Visualization/logs/conversion.log
 ```
 
-## full 与 moving_filtered
+每个版本自己的日志写入对应输出目录下的 `conversion_log.txt`。
+
+## 输出目录
 
 每个地点会输出两个版本：
 
-- `full`：完整版本，保留所有目标，不做静止过滤。
-- `moving_filtered`：运动过滤版本，只剔除长期静止的机动车目标，保留明显运动目标。
-
-前端数据集列表会显示：
-
 ```text
-cao_qiao_001 / full
-cao_qiao_001 / moving_filtered
+Visualization/Adjusted results/<folderName>/
+├── full/
+│   ├── <folderName>_recordingMeta.csv
+│   ├── <folderName>_tracksMeta.csv
+│   ├── <folderName>_tracks.csv
+│   ├── conversion_log.txt
+│   └── quality_report.json
+└── moving_filtered/
+    ├── <folderName>_recordingMeta.csv
+    ├── <folderName>_tracksMeta.csv
+    ├── <folderName>_tracks.csv
+    ├── conversion_log.txt
+    └── quality_report.json
 ```
 
-用户可自行选择要看的版本。`full` 永远保留完整结果，`moving_filtered` 只是额外过滤版本。
+`Visualization/Adjusted results/<folderName>/` 根目录下只保留 `full` 和 `moving_filtered` 两个文件夹，不再直接保存 CSV、日志或报告文件。
 
-## 静止门控
+## full 与 moving_filtered
 
-静止门控参数在 [converter.py](app/converter.py) 顶部：
+`full` 保留所有清洗、补全、平滑后的轨迹，不删除长期静止目标。
+
+`moving_filtered` 在 `full` 基础上剔除长期静止的机动车类目标，用于减少画面里停放车辆对轨迹查看的干扰。被过滤的目标只会从 `moving_filtered` 中删除，`full` 永远保留完整结果。
+
+静止门控参数在 [converter.py](app/converter.py) 顶部的 `STATIC_GATE` 中配置：
 
 ```python
-STATIC_GATE_CONFIG = {
+STATIC_GATE = {
     "min_track_length": 30,
-    "max_displacement": 10.0,
-    "max_mean_speed": 0.5,
+    "max_displacement": 1.0,
+    "max_mean_speed": 0.2,
     "static_ratio_threshold": 0.8,
-    "per_frame_motion_threshold": 1.0,
+    "per_frame_motion_threshold": 0.05,
 }
 ```
 
-含义：
+这些参数采用当前标准轨迹单位：位置为 m，速度为 m/s，逐帧位移阈值为 m/frame。过滤主要作用于 `car、truck、bus、freight_car、van、motor、tricycle、awning-tricycle`。
 
-- `min_track_length`：轨迹长度超过该帧数才参与静止过滤。
-- `max_displacement`：起点到终点总位移低于该像素阈值，可能是静止目标。
-- `max_mean_speed`：平均速度低于该像素/帧阈值，可能是静止目标。
-- `static_ratio_threshold`：低速帧比例高于该阈值，可能是静止目标。
-- `per_frame_motion_threshold`：单步速度低于该值时，视为静止帧。
+`quality_report.json` 会记录静止门控参数、每条 track 的运动统计、被过滤目标数量和原因。`conversion_log.txt` 也会记录被过滤的 `trackId`、类别、位移、累计路径、平均速度和静止比例。
 
-默认只对机动车类别执行静止过滤：
+## 文件夹名称解析
+
+例如：
 
 ```text
-car, truck, bus, freight_car, van
+cao_qiao_001 -> recordingId = 001, locationId = cao_qiao
 ```
 
-行人、非机动车默认不过滤，避免误删慢速移动目标。
+如果文件夹名称最后一段不是纯数字，则 `recordingId` 和 `locationId` 都暂时使用文件夹名，并在日志中给出 warning。
 
-`objects.csv` 会记录：
+## pkl 结构
+
+当前转换按真实解析到的结构读取：
+
+```python
+(frame_id, output_frame, array)
+```
+
+`traj_info` 中的 `array` 为 `N x 20`，列含义为：
 
 ```text
-displacement, path_length, mean_speed, max_speed, static_ratio, is_static, filter_reason
+0  q1_x
+1  q1_y
+2  q2_x
+3  q2_y
+4  q3_x
+5  q3_y
+6  q4_x
+7  q4_y
+8  confidence
+9  category_id
+10 object_id
+11 world_q1_x
+12 world_q1_y
+13 world_q2_x
+14 world_q2_y
+15 world_q3_x
+16 world_q3_y
+17 world_q4_x
+18 world_q4_y
+19 lane_id
 ```
 
-`metadata.json` 会记录版本名、静止门控参数、过滤目标数量和被过滤目标 ID。
+最终轨迹分析优先使用 `world_q1_x ~ world_q4_y`，像素四点框主要用于估算 `orthoPxToMeter`。
 
-## pkl 字段映射
+## 三张标准 CSV
 
-真实样本 `det_bbox_result_cao_qiao_001.pkl` 已解析确认：
+每个版本都输出以下三张 CSV，字段顺序固定。
 
-- 顶层字段：`video_info`, `output_info`, `traj_info`, `process_time`, `raw_det`
-- `traj_info` 每帧为 `(frame_id, output_frame, ndarray)` 或 `(frame_id, output_frame, ndarray, frame_time)`
-- 样本数组为 `N x 20`
-
-列映射：
-
-| 列 | 输出字段 | 含义 |
-| --- | --- | --- |
-| 0-7 | `q1_x,q1_y,...,q4_x,q4_y` | 像素四点旋转 bbox |
-| 8 | `confidence` | 置信度 |
-| 9 | `category_id/class_name` | 类别 |
-| 10 | `object_id` | 跟踪目标 ID |
-| 11-18 | `world_q1_x,...,world_q4_y` | 世界坐标四点 |
-| 19 | `lane_id` | 车道 ID |
-
-`tracks.csv` 核心字段：
+`<folderName>_recordingMeta.csv`：
 
 ```text
-dataset_id, frame_id, object_id, class_name, confidence,
-x1, y1, x2, y2, cx, cy, width, height
+recordingId,locationId,frameRate,numFrames,duration,numTracks,numVehicles,numVRUs,classTrackCounts,orthoPxToMeter
 ```
 
-扩展字段保留：
+`<folderName>_tracksMeta.csv`：
 
 ```text
-category_id, output_frame, timestamp, angle_deg,
-q1_x...q4_y, world_q1_x...world_q4_y, lane_id, source_row_index
+recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,endXCenter,endYCenter,startLaneId,endLaneId,width,length,class
 ```
 
-前端有四点旋转框时优先画旋转 bbox；没有旋转框时画水平 bbox；没有 bbox 时退化为中心点。
+`<folderName>_tracks.csv`：
 
-## 启动前端
+```text
+recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,length,xVelocity,yVelocity,xAcceleration,yAcceleration,lonVelocity,latVelocity,lonAcceleration,latAcceleration,centerX,centerY
+```
+
+其中 `width` 和 `length` 是该轨迹清洗后的稳定平均宽度和长度，同一个 `trackId` 的宽度和长度保持稳定；`centerX = xCenter`，`centerY = yCenter`。
+
+## 启动当前可视化工具
+
+后端：
 
 ```powershell
 python "Visualization\app\server.py" --host 127.0.0.1 --port 8000
@@ -175,83 +193,17 @@ python "Visualization\app\server.py" --host 127.0.0.1 --port 8000
 http://127.0.0.1:8000
 ```
 
-如果修改了前端文件，浏览器按：
+前端会自动扫描 `Visualization/Adjusted results/<folderName>/full/` 和 `Visualization/Adjusted results/<folderName>/moving_filtered/`，并在数据集列表中显示为：
 
 ```text
-Ctrl + F5
+<folderName> / full
+<folderName> / moving_filtered
 ```
 
-强制刷新缓存。
+如果页面显示“没有已转换数据集”，请先确认后端已经重启，并确认这两个版本目录下存在 `<folderName>_recordingMeta.csv`、`<folderName>_tracksMeta.csv`、`<folderName>_tracks.csv`。
 
-## 前端使用
+选择数据集后，前端会通过后端自动读取背景图：优先使用 `Visualization/Initial results/<folderName>/background_*.jpg`，如果没有则使用 `first_frame_*.jpg`。标准 CSV 中的 world/meter 坐标会由后端结合 pkl 里的像素四点框和 world 四点框估计 `world -> pixel` 映射，再返回给前端绘制，从而与背景图对齐。
 
-前端只保留一种可视化方式：检测框可视化。
+可视化中的 `显示车道` 开关会尝试读取真实车道几何并叠加到画布上。后端会优先在 `Visualization/Initial results/<folderName>/` 下查找 road_config json，识别其中的 `road`、`lane_*`、`laneline_*`、`drivingline*` 形状；如果背景图可用，road_config 中的像素几何会直接叠加到背景图坐标系。
 
-- 有旋转 bbox 时画旋转框。
-- 没有旋转 bbox 时画水平 bbox。
-- 可开关 bbox。
-- 可开关 object_id 标签。
-- 可调整轨迹拖尾长度。
-- 可按类别筛选。
-- 可播放、暂停、上一帧、下一帧、拖动时间轴、调整速度。
-
-### object_id / frame_id
-
-输入框不会自动跳转，只有点击“确认跳转”才生效。
-
-- 只输入 `object_id`：筛选该目标，从当前帧继续显示或播放。
-- 只输入 `frame_id`：跳转到指定帧，并保持当前目标筛选条件。
-- 同时输入 `object_id` 和 `frame_id`：筛选该目标，并跳转到指定帧。
-- 两个输入框都留空并点击确认：恢复全目标显示。
-- 非法输入会在画布顶部状态区提示，例如目标不存在或帧号超出范围。
-
-### 类别筛选
-
-类别筛选区提供：
-
-- `全选`
-- `取消全选`
-- 单独勾选/取消某个类别
-
-状态会显示：
-
-- `全选`
-- `全部隐藏`
-- `部分选中 x/y`
-
-### 数据集列表
-
-数据集列表有固定最大高度，超过后可以滚动。上方搜索框可按数据集名称或版本过滤，例如输入：
-
-```text
-moving
-```
-
-可快速找到 `moving_filtered` 版本。
-
-## 方向箭头
-
-方向箭头从当前目标中心点 `cx, cy` 出发，指向平滑后的运动方向。
-
-前端参数在 [app.js](app/static/app.js) 顶部：
-
-```js
-const HEADING_CONFIG = {
-  heading_smooth_window: 8,
-  min_motion_threshold: 2.0,
-  arrow_length_scale: 0.8,
-  arrow_min_length: 8,
-  arrow_max_length: 40,
-};
-```
-
-计算逻辑：
-
-1. 对每个 `object_id` 查最近 `heading_smooth_window` 帧内的中心点。
-2. 用 `cx(t)-cx(t-N)`、`cy(t)-cy(t-N)` 计算平滑位移方向。
-3. 如果位移小于 `min_motion_threshold`，认为当前方向无效。
-4. 方向有效时更新该目标的 `last_valid_heading` 缓存。
-5. 方向无效时沿用该目标上一次有效方向。
-6. 如果目标从未有过有效方向，暂时不显示箭头。
-
-因此低速或静止目标不会因为检测抖动而出现乱转箭头。
+注意：`det_bbox_result_*.pkl` 当前只保存了每帧目标的 `lane_id`，没有保存车道线或车道区域几何本身。因此如果结果文件夹里没有对应 road_config json，前端会提示未找到车道几何。目标详情和悬停提示始终会显示当前帧 `lane_id`。

@@ -125,6 +125,11 @@ class VideoStabilization:
         affine_matrix_pre2curr_dict = {}
         for video_index, video_file in enumerate(video_file_ls):
             cap = cv2.VideoCapture(video_file)
+            if not cap.isOpened():
+                raise RuntimeError(
+                    "VideoCapture open failed for %s. The video may be missing, "
+                    "corrupted, or encoded with an unsupported codec." % video_file
+                )
             valid_frames = num_frame_ls[video_index]
             # 第一个视频跳过video_start_frame帧
             if video_index == 0:
@@ -233,6 +238,17 @@ class VideoStabilization:
                     # print('\rprocess frame:%d/%d, FPS:%.1f, remain time:%.2f min' % (
                     # frame_index, all_num_frame - video_end_frame, fps, remain_time / 60))
                     print('\rprocess frame:%d/%d, FPS:%.1f, remain time:%.2f min' % (frame_index, all_num_frame-video_end_frame,cal_fps, remain_time / 60), end="", flush=True)
+            cap.release()
+            expected_frames = max(0, int(valid_frames))
+            missing_frames = expected_frames - video_frame_index
+            allowed_missing = max(5, int(expected_frames * 0.01))
+            if missing_frames > allowed_missing:
+                raise RuntimeError(
+                    "Video decode stopped early for %s: decoded %d/%d frames. "
+                    "The input may be corrupted or the HEVC stream may be "
+                    "unsupported by the current OpenCV/FFmpeg build."
+                    % (video_file, video_frame_index, expected_frames)
+                )
 
         if step == 1 or step == 3:
             self._save_transforms(raw_pkl_path)

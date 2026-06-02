@@ -173,6 +173,18 @@ def _get_stabilize_output_path(config: dict[str, Any]) -> Path | None:
     return output_folder / str(stabilize_file)
 
 
+def _get_runtime_config_dir(config: dict[str, Any]) -> Path:
+    save_folder = config.get("save_folder") or config.get("output_dir")
+    video_files = _get_video_files(config)
+    if not save_folder or not video_files:
+        return Path(str(config["output_dir"]))
+
+    first_video_name = Path(video_files[0]).stem
+    if len(video_files) == 1:
+        return Path(str(save_folder)) / first_video_name
+    return Path(str(save_folder)) / f"{first_video_name}_Num_{len(video_files)}"
+
+
 def load_config(config_path: Path) -> dict[str, Any]:
     with config_path.open("r", encoding="utf-8") as fh:
         raw_config = yaml.safe_load(fh) or {}
@@ -188,14 +200,21 @@ def prepare_runtime_config(config: dict[str, Any]) -> tuple[Path, Path, Path, Pa
     output_dir = Path(config["output_dir"])
     log_dir = Path(config["log_dir"])
     checkpoint_dir = Path(config["checkpoint_dir"])
+    runtime_config_dir = _get_runtime_config_dir(config)
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    runtime_config_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    runtime_config_path = output_dir / "runtime_config.json"
-    with runtime_config_path.open("w", encoding="utf-8") as fh:
+    runtime_config_path = runtime_config_dir / "runtime_config.json"
+    tmp_path = runtime_config_dir / f".runtime_config.{os.getpid()}.tmp"
+    with tmp_path.open("w", encoding="utf-8") as fh:
         json.dump(config, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, runtime_config_path)
 
     return runtime_config_path, output_dir, log_dir, checkpoint_dir
 

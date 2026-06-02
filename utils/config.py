@@ -212,6 +212,11 @@ class RoadConfig:
                         x1, y1 = points[0]
                         x2, y2 = points[1]
                         pixel_length = ((x1-x2)**2+(y1-y2)**2)**0.5
+                        if pixel_length == 0:
+                            raise ValueError(
+                                "Road config %s has a length calibration with "
+                                "identical endpoints: %s" % (filename, shape['label'])
+                            )
                         length_per_pixel = length/pixel_length
                         length_per_pixel_ls.append(length_per_pixel)
                     if shape['label'] == 'x': # x轴
@@ -316,10 +321,29 @@ class RoadConfig:
         :return:
         '''
         axis_length = (axis_vector[0] ** 2 + axis_vector[1] ** 2) ** 0.5
+        if axis_length == 0 or not np.isfinite(axis_length):
+            raise ValueError("Road config axis vector must have non-zero finite length.")
         u_x = pixel_length / axis_length * axis_vector[0]
         u_y = pixel_length / axis_length * axis_vector[1]
-        positive_direction = int(min((w - base_points[0]) / abs(u_x), (h - base_points[1]) /abs(u_y)))
-        negative_direction = int(min(base_points[0] / abs(u_x), base_points[1] / abs(u_y)))
+        if not np.isfinite(u_x) or not np.isfinite(u_y) or (u_x == 0 and u_y == 0):
+            raise ValueError("Road config axis unit vector must be finite and non-zero.")
+
+        def max_steps(dx, dy):
+            steps = []
+            if dx > 0:
+                steps.append((w - base_points[0]) / dx)
+            elif dx < 0:
+                steps.append(base_points[0] / abs(dx))
+            if dy > 0:
+                steps.append((h - base_points[1]) / dy)
+            elif dy < 0:
+                steps.append(base_points[1] / abs(dy))
+            if not steps:
+                return 0
+            return max(0, int(min(steps)))
+
+        positive_direction = max_steps(u_x, u_y)
+        negative_direction = max_steps(-u_x, -u_y)
         num_direction = max(positive_direction,negative_direction)
         cv2.line(img,
                         (int(base_points[0] - num_direction * u_x), int(base_points[1] - num_direction * u_y)),

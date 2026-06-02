@@ -10,7 +10,7 @@ output_dir: ${data_dir}/output_server39
 log_dir: ${project_root}/logs/server39
 checkpoint_dir: ${project_root}/checkpoints
 
-batch_size: 144
+batch_size: 96
 num_workers: 0
 device: cuda:0
 epochs: 1
@@ -28,8 +28,8 @@ inference_batch_size: ${batch_size}
 bbox_label: [id, cat, score, lane]
 pipeline: [stab, det]
 split_gap: 160
-subsize_height: 360
-subsize_width: 448
+subsize_height: 416
+subsize_width: 512
 stabilize_scale: 0
 video_start_frame: 0
 video_end_frame: 0

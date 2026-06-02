@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 import sys
 from copy import deepcopy
@@ -12,11 +13,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback for local checks.
+    fcntl = None
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.train import load_config, run_config
+from utils import RoadConfig
 
 
 VIDEO_SUFFIXES = {".mp4", ".MP4", ".mov", ".MOV", ".avi", ".AVI", ".mkv", ".MKV"}
@@ -157,6 +164,28 @@ def _road_config_for_video(road_config_dir: Path, pattern: str, video_path: Path
     return road_config_path
 
 
+def _validate_road_config(road_config_path: Path, video_path: Path) -> None:
+    road_config = RoadConfig.fromfile(str(road_config_path))
+    length_per_pixel = road_config.get("length_per_pixel")
+    if length_per_pixel is None:
+        raise ValueError(
+            f"Road config for video '{video_path.name}' has no valid length_* "
+            f"calibration; length_per_pixel is required: {road_config_path}"
+        )
+    try:
+        length_value = float(length_per_pixel)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Road config for video '{video_path.name}' has invalid "
+            f"length_per_pixel={length_per_pixel!r}: {road_config_path}"
+        ) from exc
+    if not math.isfinite(length_value) or length_value <= 0:
+        raise ValueError(
+            f"Road config for video '{video_path.name}' has invalid "
+            f"length_per_pixel={length_per_pixel!r}: {road_config_path}"
+        )
+
+
 def _video_output_dir(scene_output_dir: Path, video_path: Path) -> Path:
     return scene_output_dir / video_path.stem
 
@@ -225,7 +254,14 @@ def _setup_scene_logger(log_dir: Path, scene_name: str) -> tuple[logging.Logger,
 def _append_status(status_path: Path, payload: dict[str, Any]) -> None:
     status_path.parent.mkdir(parents=True, exist_ok=True)
     with status_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            fh.flush()
+        finally:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def main() -> None:
@@ -325,6 +361,7 @@ def main() -> None:
         )
 
         try:
+            _validate_road_config(road_config_path, video_path)
             run_config(video_config, config_path=config_path, echo_paths=False)
         except Exception as exc:
             failed += 1

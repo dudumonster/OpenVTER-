@@ -218,9 +218,15 @@ class DroneVideoProcess:
         self.writer_path = None
 
         try:
+            completed = False
             s_time = time.time()
             for video_index,video_file in enumerate(self.video_file):
                 cap = cv2.VideoCapture(video_file)
+                if not cap.isOpened():
+                    raise RuntimeError(
+                        "VideoCapture open failed for %s. The video may be missing, "
+                        "corrupted, or encoded with an unsupported codec." % video_file
+                    )
                 valid_frames = num_frame_ls[video_index]
                 if video_index == 0:
                     cap.set(cv2.CAP_PROP_POS_FRAMES,self.video_start_frame)
@@ -255,11 +261,23 @@ class DroneVideoProcess:
                     frame_index += 1
                     current_video_frame += 1
                 cap.release()
+                expected_frames = max(0, int(valid_frames))
+                missing_frames = expected_frames - video_frame_index
+                allowed_missing = max(5, int(expected_frames * 0.01))
+                if missing_frames > allowed_missing:
+                    raise RuntimeError(
+                        "Video decode stopped early for %s: decoded %d/%d frames. "
+                        "The input may be corrupted or the HEVC stream may be "
+                        "unsupported by the current OpenCV/FFmpeg build."
+                        % (video_file, video_frame_index, expected_frames)
+                    )
+            completed = True
         finally:
             if self.output_video and self.video_writer is not None:
                 self.video_writer.release()
-            self._save_det_bbox(self.save_folder)
-            print('save video')
+            if completed:
+                self._save_det_bbox(self.save_folder)
+                print('save video')
 
 
     # —— 延迟初始化写视频 + 安全写帧
@@ -528,8 +546,27 @@ class DroneVideoProcess:
 
     def _load_road_config(self,path):
         if not path:
-            return
-        return RoadConfig.fromfile(path)
+            raise ValueError("road_config is required for video processing.")
+        road_config = RoadConfig.fromfile(path)
+        length_per_pixel = road_config.get('length_per_pixel', None)
+        if length_per_pixel is None:
+            raise ValueError(
+                "Road config %s has no valid length_* calibration; "
+                "length_per_pixel is required." % path
+            )
+        try:
+            length_value = float(length_per_pixel)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Road config %s has invalid length_per_pixel=%r."
+                % (path, length_per_pixel)
+            ) from exc
+        if not np.isfinite(length_value) or length_value <= 0:
+            raise ValueError(
+                "Road config %s has invalid length_per_pixel=%r."
+                % (path, length_per_pixel)
+            )
+        return road_config
 
     def _pixel_to_xy(self,nms_result):
         pixel2xy_matrix = self.road_config['pixel2xy_matrix']

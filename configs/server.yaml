@@ -10,7 +10,7 @@ output_dir: ${data_dir}/output_server39
 log_dir: ${project_root}/logs/server39
 checkpoint_dir: ${project_root}/checkpoints
 
-batch_size: 16
+batch_size: 96
 num_workers: 0
 device: cuda:0
 epochs: 1

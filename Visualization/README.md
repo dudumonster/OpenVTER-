@@ -76,12 +76,18 @@ Visualization/Adjusted results/<folderName>/
 │   ├── <folderName>_recordingMeta.csv
 │   ├── <folderName>_tracksMeta.csv
 │   ├── <folderName>_tracks.csv
+│   ├── id_mapping.csv
+│   ├── filter_report.csv
+│   ├── metadata.json
 │   ├── conversion_log.txt
 │   └── quality_report.json
 └── moving_filtered/
     ├── <folderName>_recordingMeta.csv
     ├── <folderName>_tracksMeta.csv
     ├── <folderName>_tracks.csv
+    ├── id_mapping.csv
+    ├── filter_report.csv
+    ├── metadata.json
     ├── conversion_log.txt
     └── quality_report.json
 ```
@@ -92,7 +98,7 @@ Visualization/Adjusted results/<folderName>/
 
 `full` 保留所有清洗、补全、平滑后的轨迹，不删除长期静止目标。
 
-`moving_filtered` 在 `full` 基础上剔除长期静止的机动车类目标，用于减少画面里停放车辆对轨迹查看的干扰。被过滤的目标只会从 `moving_filtered` 中删除，`full` 永远保留完整结果。
+`moving_filtered` 在 `full` 基础上先剔除高置信疑似 ID 断裂 tracklet group，再剔除长期静止的机动车类目标，用于减少异常断裂片段和停放车辆对轨迹查看的干扰。被过滤的目标只会从 `moving_filtered` 中删除，`full` 不做 ID 断裂筛除。
 
 静止门控参数在 [converter.py](app/converter.py) 顶部的 `STATIC_GATE` 中配置：
 
@@ -112,6 +118,18 @@ STATIC_GATE = {
 静止过滤会把检测抖动造成的微小变化也当作静止处理：只要车辆 95% 轨迹点都落在很小范围内，就会从 `moving_filtered` 删除；不再依赖容易被少量异常点污染的首尾位移或累计路径作为必要条件。`full` 版本仍保留这些静止车辆，但可视化时不绘制方向箭头，只显示目标框。
 
 `quality_report.json` 会记录静止门控参数、每条 track 的运动统计、被过滤目标数量和原因。`conversion_log.txt` 也会记录被过滤的 `trackId`、类别、位移、累计路径、平均速度和静止比例。
+
+疑似 ID 断裂过滤参数在 [converter.py](app/converter.py) 顶部的 `FRAGMENTATION_FILTER` 中配置。策略固定为 `drop_all_suspected_fragments`：如果多个原始 `raw_object_id` 被高置信判断为同一个真实目标断裂后的片段，不做轨迹重连、不合并、不保留质量最好片段，而是在 `moving_filtered` 中整组删除。该逻辑按类别兼容组、时间 gap、预测位置、bbox 尺寸、运动方向和图像边界惩罚综合评分；宁愿少删，也避免误删。`full` 版本不使用该过滤。
+
+每个版本都会输出 `id_mapping.csv`，用于追溯原始 ID 和最终 ID：
+
+```text
+dataset_id,version,raw_object_id,final_object_id,class_name_mode,start_frame,end_frame,total_frames,mean_confidence,is_kept,is_filtered,filter_type,filter_reason,fragmentation_group_id,quality_score
+```
+
+`raw_object_id` 是 pkl 中原始 `object_id`，`final_object_id` 是转换后前端默认显示和筛选使用的最终 `object_id`。被过滤的 raw tracklet 会保留在映射文件中，但 `final_object_id` 为空，并写明 `filter_type/filter_reason`。
+
+每个版本还会输出 `filter_report.csv`，记录未进入当前版本的 raw tracklet。对疑似 ID 断裂组，`filter_reason` 为 `suspected_id_fragmentation_drop_all_related_tracklets`，并记录 `fragmentation_group_id`、相关 raw ID 和评分。
 
 ## 补帧与无向框修正
 
@@ -179,16 +197,16 @@ recordingId,locationId,frameRate,numFrames,duration,numTracks,numVehicles,numVRU
 `<folderName>_tracksMeta.csv`：
 
 ```text
-recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,endXCenter,endYCenter,startLaneId,endLaneId,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,missing_ratio,class
+recordingId,trackId,raw_object_id,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,endXCenter,endYCenter,startLaneId,endLaneId,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,missing_ratio,class
 ```
 
 `<folderName>_tracks.csv`：
 
 ```text
-recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,is_interpolated,missing_ratio,xVelocity,yVelocity,xAcceleration,yAcceleration,lonVelocity,latVelocity,lonAcceleration,latAcceleration,centerX,centerY
+recordingId,trackId,raw_object_id,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,is_interpolated,missing_ratio,xVelocity,yVelocity,xAcceleration,yAcceleration,lonVelocity,latVelocity,lonAcceleration,latAcceleration,centerX,centerY
 ```
 
-其中 `width` 和 `length` 是该轨迹修正后的稳定宽度和长度，同一个 `trackId` 的宽度和长度保持稳定；`raw_mean_width/raw_mean_height` 记录补帧前真实检测帧尺寸统计，`corrected_width/corrected_height` 与可视化旋转框使用的尺寸同步；`centerX = xCenter`，`centerY = yCenter`。
+其中 `trackId` 是当前版本最终 ID，`raw_object_id` 是原始 pkl 中的 ID。前端默认仍按最终 `object_id/trackId` 显示和筛选，但目标详情会同时显示 `raw_object_id`。`width` 和 `length` 是该轨迹修正后的稳定宽度和长度，同一个 `trackId` 的宽度和长度保持稳定；`raw_mean_width/raw_mean_height` 记录补帧前真实检测帧尺寸统计，`corrected_width/corrected_height` 与可视化旋转框使用的尺寸同步；`centerX = xCenter`，`centerY = yCenter`。
 
 ## 启动当前可视化工具
 

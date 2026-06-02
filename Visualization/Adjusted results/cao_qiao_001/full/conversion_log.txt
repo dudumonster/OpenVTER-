@@ -9,19 +9,26 @@
 [INFO] final_track_count=152
 [INFO] classTrackCounts={'car': 105, 'truck': 4, 'bus': 0, 'freight_car': 1, 'van': 6, 'pedestrian': 1, 'people': 1, 'bicycle': 0, 'tricycle': 1, 'awning-tricycle': 0, 'motor': 33}
 [INFO] output_versions=full,moving_filtered
+[INFO] fragmentation_filter_parameters={'enabled': True, 'min_gap_frames': 5, 'max_gap_frames': 100, 'min_track_frames': 5, 'score_threshold': 0.7, 'max_position_distance_base': 30.0, 'max_position_distance_gap_factor': 2.0, 'min_bbox_size_ratio': 0.4, 'max_bbox_size_ratio': 2.5, 'max_heading_diff_deg': 60.0, 'border_margin_px': 20.0, 'velocity_window_frames': 5, 'filter_strategy': 'drop_all_suspected_fragments'}
+[INFO] fragmentation_filter_strategy=drop_all_suspected_fragments
+[INFO] full fragmentation_filtered_count=0 (fragmentation filter disabled for full)
+[INFO] moving_filtered fragmentation_groups=3 fragmentation_filtered_tracks=6
+[INFO] fragmentation_group fg_0001 raw_object_ids=[100143, 100163] score=0.8105 strategy=drop_all_suspected_fragments reason=suspected_id_fragmentation_drop_all_related_tracklets
+[INFO] fragmentation_group fg_0002 raw_object_ids=[100465, 100534] score=0.7824 strategy=drop_all_suspected_fragments reason=suspected_id_fragmentation_drop_all_related_tracklets
+[INFO] fragmentation_group fg_0003 raw_object_ids=[100509, 100535] score=0.7555 strategy=drop_all_suspected_fragments reason=suspected_id_fragmentation_drop_all_related_tracklets
 [INFO] static_gate_parameters={'min_track_length': 30, 'max_displacement': 1.0, 'max_path_length': 2.0, 'max_stationary_extent': 2.0, 'max_mean_speed': 0.2, 'static_ratio_threshold': 0.8, 'per_frame_motion_threshold': 0.05, 'filter_classes': ['awning-tricycle', 'bus', 'car', 'freight_car', 'motor', 'tricycle', 'truck', 'van']}
-[INFO] moving_filtered original_tracks=152 filtered_tracks=11 kept_tracks=141
-[INFO] static_filtered trackId=3 class=car frames=9022 displacement=0.2905 path_length=16.9747 stationary_extent=0.3029 mean_speed=0.0564 static_ratio=0.9993 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=5 class=car frames=9022 displacement=0.3403 path_length=20.8245 stationary_extent=0.4101 mean_speed=0.0692 static_ratio=0.9978 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=8 class=car frames=9022 displacement=0.3749 path_length=25.7075 stationary_extent=0.3912 mean_speed=0.0854 static_ratio=0.9990 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=10 class=van frames=9022 displacement=0.5337 path_length=24.1477 stationary_extent=0.6766 mean_speed=0.0802 static_ratio=0.9977 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=11 class=car frames=9022 displacement=0.3224 path_length=16.0654 stationary_extent=0.3125 mean_speed=0.0534 static_ratio=0.9988 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=12 class=car frames=9022 displacement=0.5879 path_length=27.4213 stationary_extent=0.6766 mean_speed=0.0911 static_ratio=0.9977 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=13 class=car frames=5636 displacement=17.1651 path_length=29.2980 stationary_extent=1.9749 mean_speed=0.1558 static_ratio=0.9812 reason=low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=14 class=car frames=5780 displacement=0.0187 path_length=25.6576 stationary_extent=0.3110 mean_speed=0.1331 static_ratio=1.0000 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=15 class=car frames=5674 displacement=0.4705 path_length=19.2196 stationary_extent=0.5663 mean_speed=0.1015 static_ratio=0.9998 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=16 class=car frames=695 displacement=0.4684 path_length=2.8926 stationary_extent=0.5675 mean_speed=0.1249 static_ratio=1.0000 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
-[INFO] static_filtered trackId=88 class=car frames=652 displacement=0.3019 path_length=0.6615 stationary_extent=0.3259 mean_speed=0.0305 static_ratio=1.0000 reason=low_displacement,low_path_length,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] moving_filtered original_tracks=146 filtered_tracks=11 kept_tracks=135
+[INFO] static_filtered trackId=3 raw_object_id=3 class=car frames=9022 displacement=0.2905 path_length=16.9747 stationary_extent=0.3029 mean_speed=0.0564 static_ratio=0.9993 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=5 raw_object_id=5 class=car frames=9022 displacement=0.3403 path_length=20.8245 stationary_extent=0.4101 mean_speed=0.0692 static_ratio=0.9978 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=8 raw_object_id=11 class=car frames=9022 displacement=0.3749 path_length=25.7075 stationary_extent=0.3912 mean_speed=0.0854 static_ratio=0.9990 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=10 raw_object_id=13 class=van frames=9022 displacement=0.5337 path_length=24.1477 stationary_extent=0.6766 mean_speed=0.0802 static_ratio=0.9977 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=11 raw_object_id=14 class=car frames=9022 displacement=0.3224 path_length=16.0654 stationary_extent=0.3125 mean_speed=0.0534 static_ratio=0.9988 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=12 raw_object_id=15 class=car frames=9022 displacement=0.5879 path_length=27.4213 stationary_extent=0.6766 mean_speed=0.0911 static_ratio=0.9977 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=13 raw_object_id=16 class=car frames=5636 displacement=17.1651 path_length=29.2980 stationary_extent=1.9749 mean_speed=0.1558 static_ratio=0.9812 reason=low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=14 raw_object_id=17 class=car frames=5780 displacement=0.0187 path_length=25.6576 stationary_extent=0.3110 mean_speed=0.1331 static_ratio=1.0000 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=15 raw_object_id=18 class=car frames=5674 displacement=0.4705 path_length=19.2196 stationary_extent=0.5663 mean_speed=0.1015 static_ratio=0.9998 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=16 raw_object_id=19 class=car frames=695 displacement=0.4684 path_length=2.8926 stationary_extent=0.5675 mean_speed=0.1249 static_ratio=1.0000 reason=low_displacement,low_stationary_extent,low_mean_speed,high_static_ratio
+[INFO] static_filtered trackId=88 raw_object_id=358 class=car frames=652 displacement=0.3019 path_length=0.6615 stationary_extent=0.3259 mean_speed=0.0305 static_ratio=1.0000 reason=low_displacement,low_path_length,low_stationary_extent,low_mean_speed,high_static_ratio
 [INFO] category_jump_object_count=33
 [INFO] category_jump_final_track_count=66
 [INFO] category_jump detail track=object_id=12 class_counts={'truck': 211, 'bus': 56} final_class=truck final_class_ratio=0.7903

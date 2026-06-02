@@ -221,7 +221,10 @@ def _standard_metadata(dataset_id: str, version: str, dataset_dir: Path):
         size = background_size
     classes = sorted({row.get("class") or "unknown" for row in tracks_meta})
     static_gate = quality.get("staticGate", {})
-    filtered_count = static_gate.get("filtered_track_count", 0) if version == "moving_filtered" else 0
+    fragmentation = quality.get("fragmentationFilter", {})
+    filtered_count = 0
+    if version == "moving_filtered":
+        filtered_count = (static_gate.get("filtered_track_count", 0) or 0) + (fragmentation.get("filtered_track_count", 0) or 0)
     return {
         "dataset_id": dataset_id,
         "version": version,
@@ -235,6 +238,8 @@ def _standard_metadata(dataset_id: str, version: str, dataset_dir: Path):
         "object_count": len(tracks_meta),
         "full_object_count": quality.get("staticGate", {}).get("original_track_count", len(tracks_meta)),
         "filtered_object_count": filtered_count,
+        "fragmentation_filtered_count": fragmentation.get("filtered_track_count", 0),
+        "static_filtered_count": static_gate.get("filtered_track_count", 0) if version == "moving_filtered" else 0,
         "class_names": classes,
         "warnings": quality.get("quality", {}).get("warnings", []),
         "coordinate_system": "standard_pixel_background" if background_size else "standard_world_meter_view",
@@ -245,6 +250,7 @@ def _standard_tracks(dataset_dir: Path):
     _, tracks_meta, tracks, _ = _standard_source(dataset_dir)
     dataset_id = dataset_dir.parent.name
     class_by_track = {row.get("trackId"): row.get("class") or "unknown" for row in tracks_meta}
+    raw_by_track = {row.get("trackId"): row.get("raw_object_id") or row.get("trackId") for row in tracks_meta}
     bounds = _standard_bounds(tracks)
     world_to_pixel = _world_to_pixel_affine(dataset_id) if _background_path(dataset_id, dataset_dir) else None
     out = []
@@ -267,6 +273,7 @@ def _standard_tracks(dataset_dir: Path):
             "dataset_id": dataset_id,
             "frame_id": row.get("frame"),
             "object_id": row.get("trackId"),
+            "raw_object_id": row.get("raw_object_id") or raw_by_track.get(row.get("trackId"), row.get("trackId")),
             "class_name": class_by_track.get(row.get("trackId"), "unknown"),
             "confidence": "",
             "x1": min(xs),
@@ -309,6 +316,7 @@ def _standard_objects(dataset_dir: Path):
             {
                 "dataset_id": dataset_dir.parent.name,
                 "object_id": track_id,
+                "raw_object_id": row.get("raw_object_id") or track_id,
                 "class_name": row.get("class"),
                 "start_frame": row.get("initialFrame"),
                 "end_frame": row.get("finalFrame"),

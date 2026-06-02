@@ -97,6 +97,30 @@ CONFUSABLE_CLASS_GROUPS = [
     {"pedestrian", "people"},
 ]
 
+FRAGMENTATION_CLASS_GROUPS = [
+    {"car", "van"},
+    {"truck", "freight_car", "bus"},
+    {"motor", "tricycle", "awning-tricycle"},
+    {"pedestrian", "people"},
+    {"bicycle"},
+]
+
+FRAGMENTATION_FILTER = {
+    "enabled": True,
+    "min_gap_frames": 5,
+    "max_gap_frames": 100,
+    "min_track_frames": 5,
+    "score_threshold": 0.70,
+    "max_position_distance_base": 30.0,
+    "max_position_distance_gap_factor": 2.0,
+    "min_bbox_size_ratio": 0.4,
+    "max_bbox_size_ratio": 2.5,
+    "max_heading_diff_deg": 60.0,
+    "border_margin_px": 20.0,
+    "velocity_window_frames": 5,
+    "filter_strategy": "drop_all_suspected_fragments",
+}
+
 # The converter writes two dataset versions:
 # full keeps every cleaned track, while moving_filtered removes long-lived,
 # nearly stationary motorized tracks. Values are in the current SI trajectory
@@ -128,6 +152,7 @@ RECORDING_META_FIELDS = [
 TRACKS_META_FIELDS = [
     "recordingId",
     "trackId",
+    "raw_object_id",
     "initialFrame",
     "finalFrame",
     "numFrames",
@@ -151,6 +176,7 @@ TRACKS_META_FIELDS = [
 TRACKS_FIELDS = [
     "recordingId",
     "trackId",
+    "raw_object_id",
     "lane_id",
     "frame",
     "trackLifetime",
@@ -176,6 +202,40 @@ TRACKS_FIELDS = [
     "latAcceleration",
     "centerX",
     "centerY",
+]
+
+ID_MAPPING_FIELDS = [
+    "dataset_id",
+    "version",
+    "raw_object_id",
+    "final_object_id",
+    "class_name_mode",
+    "start_frame",
+    "end_frame",
+    "total_frames",
+    "mean_confidence",
+    "is_kept",
+    "is_filtered",
+    "filter_type",
+    "filter_reason",
+    "fragmentation_group_id",
+    "quality_score",
+]
+
+FILTER_REPORT_FIELDS = [
+    "dataset_id",
+    "version",
+    "raw_object_id",
+    "filter_type",
+    "filter_reason",
+    "fragmentation_group_id",
+    "related_raw_object_ids",
+    "fragmentation_score",
+    "quality_score",
+    "start_frame",
+    "end_frame",
+    "total_frames",
+    "class_name_mode",
 ]
 
 
@@ -404,6 +464,8 @@ def _expand_traj_info(data: Dict[str, Any], logger: logging.Logger, quality: Dic
             raw_width, raw_length = _edge_sizes(world)
             x_center = float(world[:, 0].mean())
             y_center = float(world[:, 1].mean())
+            pixel_center_x = float(pixel[:, 0].mean())
+            pixel_center_y = float(pixel[:, 1].mean())
             lane_id = int(raw[19]) if raw.shape[0] >= 20 and _finite(raw[19]) else -1
             if lane_id == -1:
                 lane_minus_one += 1
@@ -425,6 +487,8 @@ def _expand_traj_info(data: Dict[str, Any], logger: logging.Logger, quality: Dic
                     "q3_y": float(pixel[2, 1]),
                     "q4_x": float(pixel[3, 0]),
                     "q4_y": float(pixel[3, 1]),
+                    "pixel_cx": pixel_center_x,
+                    "pixel_cy": pixel_center_y,
                     "world_q1_x": float(world[0, 0]),
                     "world_q1_y": float(world[0, 1]),
                     "world_q2_x": float(world[1, 0]),
@@ -503,6 +567,274 @@ def _track_missing_stats(object_id: int, rows: List[Dict[str, Any]]) -> Dict[str
         "is_dropped": ratio > MAX_MISSING_RATIO,
         "drop_reason": "missing_ratio_exceeded" if ratio > MAX_MISSING_RATIO else "",
         "num_interpolated_frames": 0 if ratio > MAX_MISSING_RATIO else missing,
+    }
+
+
+def _class_group_key(class_name: str) -> Optional[int]:
+    for idx, group in enumerate(FRAGMENTATION_CLASS_GROUPS):
+        if class_name in group:
+            return idx
+    return None
+
+
+def _angle_diff_deg(a: Optional[float], b: Optional[float]) -> Optional[float]:
+    if a is None or b is None:
+        return None
+    diff = abs((a - b + 180.0) % 360.0 - 180.0)
+    return diff
+
+
+def _dedupe_rows_for_stats(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_frame: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_frame[int(row["frame"])].append(row)
+    return [dict(max(frame_rows, key=_confidence_key)) for _, frame_rows in sorted(by_frame.items())]
+
+
+def _velocity_from_points(points: List[Tuple[int, float, float]], use_tail: bool, window: int) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    if len(points) < 2:
+        return None, None, None
+    sample = points[-window:] if use_tail else points[:window]
+    if len(sample) < 2:
+        sample = points
+    f0, x0, y0 = sample[0]
+    f1, x1, y1 = sample[-1]
+    dt = max(int(f1) - int(f0), 0)
+    if dt <= 0:
+        return None, None, None
+    vx = (float(x1) - float(x0)) / dt
+    vy = (float(y1) - float(y0)) / dt
+    heading = math.degrees(math.atan2(vy, vx)) % 360.0 if math.hypot(vx, vy) > 1e-9 else None
+    return vx, vy, heading
+
+
+def _raw_tracklet_stats(raw_rows: List[Dict[str, Any]], dataset_id: str, frame_rate: float) -> Dict[int, Dict[str, Any]]:
+    grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for row in raw_rows:
+        grouped[int(row["object_id"])].append(row)
+
+    stats_by_raw: Dict[int, Dict[str, Any]] = {}
+    for raw_id, grouped_rows in sorted(grouped.items()):
+        rows = _dedupe_rows_for_stats(grouped_rows)
+        frames = [int(row["frame"]) for row in rows]
+        points = [(int(row["frame"]), float(row["xCenter_raw"]), float(row["yCenter_raw"])) for row in rows]
+        pixel_points = [(float(row.get("pixel_cx", math.nan)), float(row.get("pixel_cy", math.nan))) for row in rows]
+        classes = [row.get("raw_class") or "unknown" for row in rows]
+        class_counts = Counter(classes)
+        class_name_mode = class_counts.most_common(1)[0][0] if class_counts else "unknown"
+        confidences = [float(row["confidence"]) for row in rows if _finite(row.get("confidence"))]
+        widths = [float(row["raw_width"]) for row in rows if _finite(row.get("raw_width"))]
+        heights = [float(row["raw_length"]) for row in rows if _finite(row.get("raw_length"))]
+        segment_distances = [
+            _dist((a[1], a[2]), (b[1], b[2]))
+            for a, b in zip(points[:-1], points[1:])
+        ]
+        segment_speeds = []
+        for dist, f0, f1 in zip(segment_distances, frames[:-1], frames[1:]):
+            dt = max((f1 - f0) / frame_rate, 1.0 / frame_rate)
+            segment_speeds.append(dist / dt)
+        elapsed = max((frames[-1] - frames[0]) / frame_rate, 1.0 / frame_rate) if len(frames) >= 2 else 1.0 / frame_rate
+        path_length = float(sum(segment_distances)) if segment_distances else 0.0
+        displacement = _dist((points[0][1], points[0][2]), (points[-1][1], points[-1][2])) if len(points) >= 2 else 0.0
+        mean_confidence = float(np.mean(confidences)) if confidences else math.nan
+        mean_width = float(np.mean(widths)) if widths else math.nan
+        mean_height = float(np.mean(heights)) if heights else math.nan
+        mean_bbox_diag = math.hypot(mean_width, mean_height) if _finite(mean_width) and _finite(mean_height) else 0.0
+        missing = max(frames[-1] - frames[0] + 1 - len(set(frames)), 0)
+        quality_score = len(frames) * mean_confidence if _finite(mean_confidence) else float(len(frames))
+        tail_vx, tail_vy, tail_heading = _velocity_from_points(points, True, int(FRAGMENTATION_FILTER["velocity_window_frames"]))
+        head_vx, head_vy, head_heading = _velocity_from_points(points, False, int(FRAGMENTATION_FILTER["velocity_window_frames"]))
+        stats_by_raw[raw_id] = {
+            "dataset_id": dataset_id,
+            "raw_object_id": raw_id,
+            "class_name_mode": class_name_mode,
+            "class_group": _class_group_key(class_name_mode),
+            "start_frame": frames[0],
+            "end_frame": frames[-1],
+            "total_frames": len(frames),
+            "frame_span": frames[-1] - frames[0] + 1,
+            "missing_frames_inside_track": missing,
+            "mean_confidence": mean_confidence,
+            "start_cx": points[0][1],
+            "start_cy": points[0][2],
+            "end_cx": points[-1][1],
+            "end_cy": points[-1][2],
+            "start_pixel_cx": pixel_points[0][0],
+            "start_pixel_cy": pixel_points[0][1],
+            "end_pixel_cx": pixel_points[-1][0],
+            "end_pixel_cy": pixel_points[-1][1],
+            "start_width": float(rows[0]["raw_width"]) if _finite(rows[0].get("raw_width")) else math.nan,
+            "start_height": float(rows[0]["raw_length"]) if _finite(rows[0].get("raw_length")) else math.nan,
+            "end_width": float(rows[-1]["raw_width"]) if _finite(rows[-1].get("raw_width")) else math.nan,
+            "end_height": float(rows[-1]["raw_length"]) if _finite(rows[-1].get("raw_length")) else math.nan,
+            "mean_width": mean_width,
+            "mean_height": mean_height,
+            "mean_bbox_diag": mean_bbox_diag,
+            "displacement": displacement,
+            "path_length": path_length,
+            "mean_speed": path_length / elapsed,
+            "max_speed": max(segment_speeds) if segment_speeds else 0.0,
+            "quality_score": quality_score,
+            "_points": points,
+            "_tail_vx": tail_vx,
+            "_tail_vy": tail_vy,
+            "_tail_heading": tail_heading,
+            "_head_heading": head_heading,
+        }
+    return stats_by_raw
+
+
+def _near_image_border(stat: Dict[str, Any], prefix: str, video_info: Dict[str, Any]) -> bool:
+    width = _safe_float(video_info.get("width"))
+    height = _safe_float(video_info.get("height"))
+    if width is None or height is None or width <= 0 or height <= 0:
+        return False
+    margin = float(FRAGMENTATION_FILTER["border_margin_px"])
+    x = _safe_float(stat.get(f"{prefix}_pixel_cx"))
+    y = _safe_float(stat.get(f"{prefix}_pixel_cy"))
+    if x is None or y is None:
+        return False
+    return x <= margin or y <= margin or x >= width - margin or y >= height - margin
+
+
+def _score_fragmentation_pair(a: Dict[str, Any], b: Dict[str, Any], video_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    cfg = FRAGMENTATION_FILTER
+    if int(b["start_frame"]) <= int(a["end_frame"]):
+        return None
+    gap = int(b["start_frame"]) - int(a["end_frame"]) - 1
+    if gap < int(cfg["min_gap_frames"]) or gap > int(cfg["max_gap_frames"]):
+        return None
+    if int(a["total_frames"]) < int(cfg["min_track_frames"]) or int(b["total_frames"]) < int(cfg["min_track_frames"]):
+        return None
+    if a.get("class_group") is None or a.get("class_group") != b.get("class_group"):
+        return None
+
+    ratios = []
+    for key in ("mean_width", "mean_height"):
+        av = _safe_float(a.get(key))
+        bv = _safe_float(b.get(key))
+        if av is None or bv is None or av <= 0 or bv <= 0:
+            continue
+        ratio = bv / av
+        if ratio < float(cfg["min_bbox_size_ratio"]) or ratio > float(cfg["max_bbox_size_ratio"]):
+            return None
+        ratios.append(min(ratio, 1.0 / ratio))
+    bbox_score = float(np.mean(ratios)) if ratios else 0.7
+
+    vx = a.get("_tail_vx")
+    vy = a.get("_tail_vy")
+    if vx is not None and vy is not None:
+        pred_x = float(a["end_cx"]) + float(vx) * gap
+        pred_y = float(a["end_cy"]) + float(vy) * gap
+    else:
+        pred_x = float(a["end_cx"])
+        pred_y = float(a["end_cy"])
+    distance = _dist((pred_x, pred_y), (float(b["start_cx"]), float(b["start_cy"])))
+    allowed = float(cfg["max_position_distance_base"]) + float(cfg["max_position_distance_gap_factor"]) * gap
+    allowed = max(allowed, max(float(a.get("mean_bbox_diag") or 0.0), float(b.get("mean_bbox_diag") or 0.0)) * 2.0)
+    if allowed <= 0 or distance > allowed:
+        return None
+    position_score = max(0.0, 1.0 - distance / allowed)
+
+    heading_diff = _angle_diff_deg(a.get("_tail_heading"), b.get("_head_heading"))
+    if heading_diff is not None:
+        if heading_diff > float(cfg["max_heading_diff_deg"]):
+            return None
+        heading_score = max(0.0, 1.0 - heading_diff / float(cfg["max_heading_diff_deg"]))
+    else:
+        heading_score = 0.7
+
+    gap_range = max(int(cfg["max_gap_frames"]) - int(cfg["min_gap_frames"]), 1)
+    gap_score = max(0.0, 1.0 - (gap - int(cfg["min_gap_frames"])) / gap_range)
+    class_score = 1.0 if a["class_name_mode"] == b["class_name_mode"] else 0.85
+    near_border = _near_image_border(a, "end", video_info) or _near_image_border(b, "start", video_info)
+    border_penalty = 0.20 if near_border else 0.0
+    score = (
+        0.20 * gap_score
+        + 0.15 * class_score
+        + 0.35 * position_score
+        + 0.15 * bbox_score
+        + 0.15 * heading_score
+        - border_penalty
+    )
+    if near_border and score < 0.95:
+        return None
+    if score < float(cfg["score_threshold"]):
+        return None
+    return {
+        "raw_a": int(a["raw_object_id"]),
+        "raw_b": int(b["raw_object_id"]),
+        "gap_frames": gap,
+        "distance": distance,
+        "max_allowed_distance": allowed,
+        "gap_score": gap_score,
+        "class_score": class_score,
+        "position_score": position_score,
+        "bbox_score": bbox_score,
+        "heading_score": heading_score,
+        "border_penalty": border_penalty,
+        "fragmentation_score": score,
+    }
+
+
+def _detect_fragmentation_groups(
+    stats_by_raw: Dict[int, Dict[str, Any]],
+    candidate_raw_ids: Iterable[int],
+    video_info: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not FRAGMENTATION_FILTER["enabled"]:
+        return {"parameters": FRAGMENTATION_FILTER, "strategy": FRAGMENTATION_FILTER["filter_strategy"], "groups": [], "pairs": [], "filtered_raw_object_ids": []}
+    candidates = [stats_by_raw[raw_id] for raw_id in sorted(set(candidate_raw_ids)) if raw_id in stats_by_raw]
+    candidates.sort(key=lambda item: (int(item["start_frame"]), int(item["raw_object_id"])))
+    pairs = []
+    edges: Dict[int, set[int]] = defaultdict(set)
+    for a in candidates:
+        for b in candidates:
+            if int(b["start_frame"]) <= int(a["end_frame"]):
+                continue
+            pair = _score_fragmentation_pair(a, b, video_info)
+            if pair is None:
+                continue
+            pairs.append(pair)
+            edges[pair["raw_a"]].add(pair["raw_b"])
+            edges[pair["raw_b"]].add(pair["raw_a"])
+
+    visited: set[int] = set()
+    groups = []
+    for raw_id in sorted(edges):
+        if raw_id in visited:
+            continue
+        stack = [raw_id]
+        component = set()
+        while stack:
+            cur = stack.pop()
+            if cur in component:
+                continue
+            component.add(cur)
+            stack.extend(sorted(edges.get(cur, set()) - component))
+        visited.update(component)
+        if len(component) < 2:
+            continue
+        group_pairs = [p for p in pairs if p["raw_a"] in component and p["raw_b"] in component]
+        group_score = max(float(p["fragmentation_score"]) for p in group_pairs) if group_pairs else 0.0
+        groups.append(
+            {
+                "fragmentation_group_id": f"fg_{len(groups) + 1:04d}",
+                "raw_object_ids": sorted(component),
+                "fragmentation_score": group_score,
+                "pair_count": len(group_pairs),
+                "pairs": group_pairs,
+                "filter_reason": "suspected_id_fragmentation_drop_all_related_tracklets",
+            }
+        )
+    filtered_raw_ids = sorted({raw_id for group in groups for raw_id in group["raw_object_ids"]})
+    return {
+        "parameters": dict(FRAGMENTATION_FILTER),
+        "strategy": FRAGMENTATION_FILTER["filter_strategy"],
+        "groups": groups,
+        "pairs": pairs,
+        "filtered_raw_object_ids": filtered_raw_ids,
+        "filtered_track_count": len(filtered_raw_ids),
     }
 
 
@@ -876,6 +1208,7 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
             tracks_rows.append(
                 {
                     "trackId": track_id,
+                    "raw_object_id": item["original_object_id"],
                     "lane_id": int(row.get("lane_id", -1)) if _finite(row.get("lane_id", -1)) else -1,
                     "frame": int(row["frame"]),
                     "trackLifetime": lifetime,
@@ -907,6 +1240,7 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
         tracks_meta.append(
             {
                 "trackId": track_id,
+                "raw_object_id": item["original_object_id"],
                 "initialFrame": frames[0],
                 "finalFrame": frames[-1],
                 "numFrames": len(rows),
@@ -1070,6 +1404,7 @@ def _track_motion_metrics(track_meta: Dict[str, Any], rows: List[Dict[str, Any]]
     )
     return {
         "trackId": int(track_meta["trackId"]),
+        "raw_object_id": int(track_meta.get("raw_object_id", track_meta["trackId"])),
         "class": cls,
         "start_frame": int(track_meta["initialFrame"]),
         "end_frame": int(track_meta["finalFrame"]),
@@ -1104,7 +1439,7 @@ def _moving_filtered_tracks(
     }
     filtered_ids = {track_id for track_id, metrics in metrics_by_track.items() if metrics["is_static"]}
     kept_meta_old = [meta for meta in tracks_meta if int(meta["trackId"]) not in filtered_ids]
-    kept_meta_old.sort(key=lambda item: (int(item["initialFrame"]), int(item["trackId"])))
+    kept_meta_old.sort(key=lambda item: (int(item["initialFrame"]), int(item.get("raw_object_id", item["trackId"]))))
     id_map = {int(meta["trackId"]): new_id for new_id, meta in enumerate(kept_meta_old, start=1)}
 
     filtered_meta = []
@@ -1134,6 +1469,151 @@ def _moving_filtered_tracks(
     return filtered_meta, filtered_rows, gate_report
 
 
+def _apply_fragmentation_filter(
+    tracks_meta: List[Dict[str, Any]],
+    tracks_rows: List[Dict[str, Any]],
+    fragmentation_report: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    filtered_raw_ids = {int(raw_id) for raw_id in fragmentation_report.get("filtered_raw_object_ids", [])}
+    if not filtered_raw_ids:
+        return [dict(row) for row in tracks_meta], [dict(row) for row in tracks_rows]
+    kept_meta = [dict(meta) for meta in tracks_meta if int(meta.get("raw_object_id", meta["trackId"])) not in filtered_raw_ids]
+    kept_ids = {int(meta["trackId"]) for meta in kept_meta}
+    kept_rows = [dict(row) for row in tracks_rows if int(row["trackId"]) in kept_ids]
+    return kept_meta, kept_rows
+
+
+def _sanitized_tracklet_stats(stats_by_raw: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    private_keys = {"_points", "_tail_vx", "_tail_vy", "_tail_heading", "_head_heading"}
+    return [{key: value for key, value in stats.items() if key not in private_keys} for _, stats in sorted(stats_by_raw.items())]
+
+
+def _base_filter_info_by_raw(quality: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    info: Dict[int, Dict[str, Any]] = {}
+    for item in quality.get("track_missing_stats", []):
+        if item.get("is_dropped"):
+            raw_id = int(item["trackId"])
+            info[raw_id] = {
+                "filter_type": "missing_ratio_filter",
+                "filter_reason": item.get("drop_reason") or "missing_ratio_exceeded",
+                "fragmentation_group_id": "",
+                "related_raw_object_ids": "",
+                "fragmentation_score": "",
+            }
+    for item in quality.get("short_duration_dropped_tracks", []):
+        raw_id = int(item["object_id"])
+        info[raw_id] = {
+            "filter_type": "short_track_filter",
+            "filter_reason": item.get("drop_reason") or "track_duration_too_short",
+            "fragmentation_group_id": "",
+            "related_raw_object_ids": "",
+            "fragmentation_score": "",
+        }
+    return info
+
+
+def _fragmentation_filter_info_by_raw(fragmentation_report: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    info: Dict[int, Dict[str, Any]] = {}
+    for group in fragmentation_report.get("groups", []):
+        raw_ids = [int(raw_id) for raw_id in group.get("raw_object_ids", [])]
+        group_id = group.get("fragmentation_group_id", "")
+        score = group.get("fragmentation_score", "")
+        for raw_id in raw_ids:
+            related = [str(other) for other in raw_ids if other != raw_id]
+            info[raw_id] = {
+                "filter_type": "fragmentation_filter",
+                "filter_reason": "suspected_id_fragmentation_drop_all_related_tracklets",
+                "fragmentation_group_id": group_id,
+                "related_raw_object_ids": "|".join(related),
+                "fragmentation_score": score,
+            }
+    return info
+
+
+def _static_filter_info_by_raw(static_gate_report: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    info: Dict[int, Dict[str, Any]] = {}
+    for item in static_gate_report.get("filtered_tracks", []):
+        raw_id = int(item.get("raw_object_id", item.get("trackId")))
+        info[raw_id] = {
+            "filter_type": "static_gate",
+            "filter_reason": item.get("filter_reason") or "stationary_track",
+            "fragmentation_group_id": "",
+            "related_raw_object_ids": "",
+            "fragmentation_score": "",
+        }
+    return info
+
+
+def _build_id_mapping_rows(
+    dataset_id: str,
+    version: str,
+    stats_by_raw: Dict[int, Dict[str, Any]],
+    tracks_meta: List[Dict[str, Any]],
+    filter_info_by_raw: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    final_by_raw = {
+        int(meta.get("raw_object_id", meta["trackId"])): int(meta["trackId"])
+        for meta in tracks_meta
+    }
+    rows = []
+    for raw_id, stats in sorted(stats_by_raw.items()):
+        kept = raw_id in final_by_raw
+        filter_info = filter_info_by_raw.get(raw_id, {})
+        rows.append(
+            {
+                "dataset_id": dataset_id,
+                "version": version,
+                "raw_object_id": raw_id,
+                "final_object_id": final_by_raw.get(raw_id, ""),
+                "class_name_mode": stats.get("class_name_mode", ""),
+                "start_frame": stats.get("start_frame", ""),
+                "end_frame": stats.get("end_frame", ""),
+                "total_frames": stats.get("total_frames", ""),
+                "mean_confidence": stats.get("mean_confidence", ""),
+                "is_kept": kept,
+                "is_filtered": not kept,
+                "filter_type": "" if kept else filter_info.get("filter_type", "not_in_version"),
+                "filter_reason": "" if kept else filter_info.get("filter_reason", "not_kept_after_conversion"),
+                "fragmentation_group_id": "" if kept else filter_info.get("fragmentation_group_id", ""),
+                "quality_score": stats.get("quality_score", ""),
+            }
+        )
+    return rows
+
+
+def _build_filter_report_rows(
+    dataset_id: str,
+    version: str,
+    stats_by_raw: Dict[int, Dict[str, Any]],
+    tracks_meta: List[Dict[str, Any]],
+    filter_info_by_raw: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    kept_raw_ids = {int(meta.get("raw_object_id", meta["trackId"])) for meta in tracks_meta}
+    rows = []
+    for raw_id, stats in sorted(stats_by_raw.items()):
+        if raw_id in kept_raw_ids:
+            continue
+        filter_info = filter_info_by_raw.get(raw_id, {})
+        rows.append(
+            {
+                "dataset_id": dataset_id,
+                "version": version,
+                "raw_object_id": raw_id,
+                "filter_type": filter_info.get("filter_type", "not_in_version"),
+                "filter_reason": filter_info.get("filter_reason", "not_kept_after_conversion"),
+                "fragmentation_group_id": filter_info.get("fragmentation_group_id", ""),
+                "related_raw_object_ids": filter_info.get("related_raw_object_ids", ""),
+                "fragmentation_score": filter_info.get("fragmentation_score", ""),
+                "quality_score": stats.get("quality_score", ""),
+                "start_frame": stats.get("start_frame", ""),
+                "end_frame": stats.get("end_frame", ""),
+                "total_frames": stats.get("total_frames", ""),
+                "class_name_mode": stats.get("class_name_mode", ""),
+            }
+        )
+    return rows
+
+
 def _write_dataset_version(
     version_dir: Path,
     folder_name: str,
@@ -1141,23 +1621,48 @@ def _write_dataset_version(
     tracks_meta: List[Dict[str, Any]],
     tracks_rows: List[Dict[str, Any]],
     report: Dict[str, Any],
+    id_mapping_rows: List[Dict[str, Any]],
+    filter_report_rows: List[Dict[str, Any]],
     log_lines: List[str],
 ) -> Dict[str, str]:
     version_dir.mkdir(parents=True, exist_ok=True)
     rec_path = version_dir / f"{folder_name}_recordingMeta.csv"
     meta_path = version_dir / f"{folder_name}_tracksMeta.csv"
     tracks_path = version_dir / f"{folder_name}_tracks.csv"
+    id_mapping_path = version_dir / "id_mapping.csv"
+    filter_report_path = version_dir / "filter_report.csv"
     _write_csv(rec_path, RECORDING_META_FIELDS, recording_meta)
     _write_csv(meta_path, TRACKS_META_FIELDS, tracks_meta)
     _write_csv(tracks_path, TRACKS_FIELDS, tracks_rows)
+    _write_csv(id_mapping_path, ID_MAPPING_FIELDS, id_mapping_rows)
+    _write_csv(filter_report_path, FILTER_REPORT_FIELDS, filter_report_rows)
     with (version_dir / "quality_report.json").open("w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
+    metadata = {
+        "dataset_id": folder_name,
+        "version": report.get("version"),
+        "use_fragmentation_filter": bool(report.get("fragmentationFilter", {}).get("use_fragmentation_filter", False)),
+        "fragmentation_filter_config": report.get("fragmentationFilter", {}).get("parameters", {}),
+        "fragmentation_filter_strategy": report.get("fragmentationFilter", {}).get("strategy", FRAGMENTATION_FILTER["filter_strategy"]),
+        "raw_track_count": report.get("rawObjectCount", 0),
+        "kept_track_count": len(tracks_meta),
+        "filtered_track_count": max(len(id_mapping_rows) - len(tracks_meta), 0),
+        "fragmentation_filtered_count": report.get("fragmentationFilter", {}).get("filtered_track_count", 0),
+        "static_filtered_count": report.get("staticGate", {}).get("filtered_track_count", 0) if report.get("version") == "moving_filtered" else 0,
+        "id_mapping_file": "id_mapping.csv",
+        "filter_report_file": "filter_report.csv",
+    }
+    with (version_dir / "metadata.json").open("w", encoding="utf-8") as fh:
+        json.dump(metadata, fh, ensure_ascii=False, indent=2)
     with (version_dir / "conversion_log.txt").open("w", encoding="utf-8") as fh:
         fh.write("\n".join(log_lines) + "\n")
     return {
         "recordingMeta": str(rec_path),
         "tracksMeta": str(meta_path),
         "tracks": str(tracks_path),
+        "idMapping": str(id_mapping_path),
+        "filterReport": str(filter_report_path),
+        "metadata": str(version_dir / "metadata.json"),
         "qualityReport": str(version_dir / "quality_report.json"),
         "conversionLog": str(version_dir / "conversion_log.txt"),
     }
@@ -1231,6 +1736,8 @@ def convert_dataset(
     if not raw_rows:
         raise ConversionError("No valid world-coordinate trajectory rows found.")
     raw_object_count = len({row["object_id"] for row in raw_rows})
+    raw_stats_by_id = _raw_tracklet_stats(raw_rows, folder_name, frame_rate)
+    quality["raw_tracklet_stats"] = _sanitized_tracklet_stats(raw_stats_by_id)
     log_line("INFO", f"raw_object_id_count={raw_object_count}")
 
     fragments = _split_raw_tracks(raw_rows, frame_rate, logger, quality)
@@ -1260,13 +1767,46 @@ def convert_dataset(
 
     full_summary = _summarize_track_set(tracks_meta)
     full_recording_meta = _build_recording_meta(recording_id, location_id, frame_rate, num_frames, ortho, full_summary)
-    moving_meta, moving_rows, static_gate_report = _moving_filtered_tracks(tracks_meta, tracks_rows, frame_rate)
+    full_raw_ids = {int(meta.get("raw_object_id", meta["trackId"])) for meta in tracks_meta}
+    fragmentation_report = _detect_fragmentation_groups(raw_stats_by_id, full_raw_ids, video_info)
+    fragmentation_meta, fragmentation_rows = _apply_fragmentation_filter(tracks_meta, tracks_rows, fragmentation_report)
+    moving_meta, moving_rows, static_gate_report = _moving_filtered_tracks(fragmentation_meta, fragmentation_rows, frame_rate)
     moving_summary = _summarize_track_set(moving_meta)
     moving_recording_meta = _build_recording_meta(recording_id, location_id, frame_rate, num_frames, ortho, moving_summary)
+
+    base_filter_info = _base_filter_info_by_raw(quality)
+    full_filter_info = dict(base_filter_info)
+    moving_filter_info = dict(base_filter_info)
+    moving_filter_info.update(_fragmentation_filter_info_by_raw(fragmentation_report))
+    moving_filter_info.update(_static_filter_info_by_raw(static_gate_report))
+    full_id_mapping_rows = _build_id_mapping_rows(folder_name, "full", raw_stats_by_id, tracks_meta, full_filter_info)
+    moving_id_mapping_rows = _build_id_mapping_rows(folder_name, "moving_filtered", raw_stats_by_id, moving_meta, moving_filter_info)
+    full_filter_report_rows = _build_filter_report_rows(folder_name, "full", raw_stats_by_id, tracks_meta, full_filter_info)
+    moving_filter_report_rows = _build_filter_report_rows(folder_name, "moving_filtered", raw_stats_by_id, moving_meta, moving_filter_info)
 
     log_line("INFO", f"final_track_count={full_summary['numTracks']}")
     log_line("INFO", f"classTrackCounts={full_summary['classTrackCounts']}")
     log_line("INFO", "output_versions=full,moving_filtered")
+    log_line("INFO", f"fragmentation_filter_parameters={FRAGMENTATION_FILTER}")
+    log_line("INFO", f"fragmentation_filter_strategy={FRAGMENTATION_FILTER['filter_strategy']}")
+    log_line("INFO", f"full fragmentation_filtered_count=0 (fragmentation filter disabled for full)")
+    log_line(
+        "INFO",
+        "moving_filtered fragmentation_groups=%s fragmentation_filtered_tracks=%s"
+        % (len(fragmentation_report.get("groups", [])), fragmentation_report.get("filtered_track_count", 0)),
+    )
+    for group in fragmentation_report.get("groups", []):
+        log_line(
+            "INFO",
+            "fragmentation_group %s raw_object_ids=%s score=%.4f strategy=%s reason=%s"
+            % (
+                group["fragmentation_group_id"],
+                group["raw_object_ids"],
+                float(group.get("fragmentation_score", 0.0)),
+                FRAGMENTATION_FILTER["filter_strategy"],
+                group["filter_reason"],
+            ),
+        )
     log_line("INFO", f"static_gate_parameters={STATIC_GATE}")
     log_line(
         "INFO",
@@ -1280,10 +1820,11 @@ def convert_dataset(
     for item in static_gate_report["filtered_tracks"]:
         log_line(
             "INFO",
-            "static_filtered trackId=%s class=%s frames=%s displacement=%.4f path_length=%.4f "
+            "static_filtered trackId=%s raw_object_id=%s class=%s frames=%s displacement=%.4f path_length=%.4f "
             "stationary_extent=%.4f mean_speed=%.4f static_ratio=%.4f reason=%s"
             % (
                 item["trackId"],
+                item.get("raw_object_id", item["trackId"]),
                 item["class"],
                 item["total_frames"],
                 item["displacement"],
@@ -1357,6 +1898,13 @@ def convert_dataset(
     full_report.update(
         {
             "version": "full",
+            "fragmentationFilter": {
+                "use_fragmentation_filter": False,
+                "parameters": dict(FRAGMENTATION_FILTER),
+                "strategy": FRAGMENTATION_FILTER["filter_strategy"],
+                "groups": [],
+                "filtered_track_count": 0,
+            },
             "finalTrackCount": full_summary["numTracks"],
             "classTrackCounts": full_summary["classTrackCounts"],
             "numVehicles": full_summary["numVehicles"],
@@ -1367,6 +1915,10 @@ def convert_dataset(
     moving_report.update(
         {
             "version": "moving_filtered",
+            "fragmentationFilter": {
+                **_json_safe(fragmentation_report),
+                "use_fragmentation_filter": True,
+            },
             "finalTrackCount": moving_summary["numTracks"],
             "classTrackCounts": moving_summary["classTrackCounts"],
             "numVehicles": moving_summary["numVehicles"],
@@ -1375,7 +1927,17 @@ def convert_dataset(
     )
 
     version_outputs = {
-        "full": _write_dataset_version(output_dir / "full", folder_name, full_recording_meta, tracks_meta, tracks_rows, full_report, dataset_log_lines),
+        "full": _write_dataset_version(
+            output_dir / "full",
+            folder_name,
+            full_recording_meta,
+            tracks_meta,
+            tracks_rows,
+            full_report,
+            full_id_mapping_rows,
+            full_filter_report_rows,
+            dataset_log_lines,
+        ),
         "moving_filtered": _write_dataset_version(
             output_dir / "moving_filtered",
             folder_name,
@@ -1383,6 +1945,8 @@ def convert_dataset(
             moving_meta,
             moving_rows,
             moving_report,
+            moving_id_mapping_rows,
+            moving_filter_report_rows,
             dataset_log_lines,
         ),
     }
@@ -1400,7 +1964,9 @@ def convert_dataset(
             },
             "moving_filtered": {
                 "numTracks": moving_summary["numTracks"],
-                "filteredTracks": static_gate_report["filtered_track_count"],
+                "filteredTracks": static_gate_report["filtered_track_count"] + fragmentation_report.get("filtered_track_count", 0),
+                "staticFilteredTracks": static_gate_report["filtered_track_count"],
+                "fragmentationFilteredTracks": fragmentation_report.get("filtered_track_count", 0),
                 "outputs": version_outputs["moving_filtered"],
             },
         },

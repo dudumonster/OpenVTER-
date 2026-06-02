@@ -76,7 +76,7 @@ Visualization/Adjusted results/<folderName>/
 
 ### moving_filtered
 
-运动过滤版本。在 `full` 的基础上剔除长期静止的机动车类轨迹。该版本只删除满足静止门控条件的最终 `trackId`，不会影响 `full` 版本。
+运动过滤版本。在 `full` 的基础上先执行高置信疑似 ID 断裂组过滤，再剔除长期静止的机动车类轨迹。疑似断裂组只在该过滤版本删除，不影响 `full` 版本。
 
 静止过滤参数位于 `converter.py` 的 `STATIC_GATE`：
 
@@ -111,7 +111,9 @@ mean_speed / max_speed: m/s
 
 `static_ratio` 的计算方式是：相邻记录中心点位移小于等于 `per_frame_motion_threshold` 的比例。
 
-`moving_filtered` 会重新给保留轨迹分配连续 `trackId`，从 1 开始。
+疑似 ID 断裂过滤参数位于 `converter.py` 的 `FRAGMENTATION_FILTER`。它只判断同一类别兼容组内、时间 gap 合理、预测位置接近、bbox 尺寸相近、运动方向合理且非明显边界进出的 raw tracklet。达到阈值后采用 `drop_all_suspected_fragments`：整组 raw tracklet 全部从 `moving_filtered` 删除，不重连、不合并、不保留质量最高或帧数最长的片段。
+
+`moving_filtered` 会在完成过滤后重新给保留轨迹分配连续 `trackId`，从 1 开始。排序依据为 `initialFrame` 和 `raw_object_id`。
 
 ## 三、每个版本的输出文件
 
@@ -121,11 +123,14 @@ mean_speed / max_speed: m/s
 <folderName>_recordingMeta.csv
 <folderName>_tracksMeta.csv
 <folderName>_tracks.csv
+id_mapping.csv
+filter_report.csv
+metadata.json
 conversion_log.txt
 quality_report.json
 ```
 
-如果目录中还存在旧版前端使用的 `tracks.csv、objects.csv、frames.csv、metadata.json、background.jpg`，它们属于历史可视化兼容产物，不是当前标准三张 CSV 转换逻辑的正式输出。
+`id_mapping.csv` 记录每个原始 `raw_object_id` 到当前版本最终 `trackId/object_id` 的映射；被过滤的 raw tracklet 也会保留记录并写明原因。`filter_report.csv` 记录未进入当前版本的 raw tracklet 及过滤原因。`metadata.json` 记录版本、过滤开关、过滤参数和统计文件名。
 
 ## 四、recordingMeta.csv 字段
 
@@ -155,7 +160,7 @@ recordingId,locationId,frameRate,numFrames,duration,numTracks,numVehicles,numVRU
 字段顺序固定：
 
 ```text
-recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,endXCenter,endYCenter,startLaneId,endLaneId,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,missing_ratio,class
+recordingId,trackId,raw_object_id,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,endXCenter,endYCenter,startLaneId,endLaneId,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,missing_ratio,class
 ```
 
 字段说明：
@@ -164,6 +169,7 @@ recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,
 | --- | --- |
 | `recordingId` | 同 `recordingMeta.csv`。 |
 | `trackId` | 当前版本内重新编号，从 1 开始连续编号。排序依据为轨迹第一帧和原始 `object_id`。 |
+| `raw_object_id` | pkl 原始结果中的 `object_id`，用于追溯最终 ID 来源。 |
 | `initialFrame` | 当前最终轨迹输出记录中的最小 `frame`。如果有补全帧，补全帧也参与最小值计算。 |
 | `finalFrame` | 当前最终轨迹输出记录中的最大 `frame`。 |
 | `numFrames` | 当前最终轨迹实际输出到 `tracks.csv` 的记录数，包括插值补全帧。不是简单的 `finalFrame - initialFrame + 1`。 |
@@ -196,7 +202,7 @@ recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,
 字段顺序固定：
 
 ```text
-recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,is_interpolated,missing_ratio,xVelocity,yVelocity,xAcceleration,yAcceleration,lonVelocity,latVelocity,lonAcceleration,latAcceleration,centerX,centerY
+recordingId,trackId,raw_object_id,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,is_interpolated,missing_ratio,xVelocity,yVelocity,xAcceleration,yAcceleration,lonVelocity,latVelocity,lonAcceleration,latAcceleration,centerX,centerY
 ```
 
 字段说明：
@@ -205,6 +211,7 @@ recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,le
 | --- | --- |
 | `recordingId` | 同 `recordingMeta.csv`。 |
 | `trackId` | 与 `tracksMeta.csv` 中的最终 `trackId` 对应。 |
+| `raw_object_id` | 当前最终轨迹对应的原始 pkl `object_id`。一个 raw ID 只会对应一个最终 ID；不会把多个 raw ID 合并成一个最终 ID。 |
 | `lane_id` | 原始 `traj_info` 第 19 列。补全帧会根据前后帧 lane 填充。无法判断时为 `-1`。 |
 | `frame` | 原始帧号，不重新从 0 或 1 编号。补全帧使用对应缺失帧号。 |
 | `trackLifetime` | 当前最终轨迹内第几条输出记录，从 1 开始递增。按实际输出记录数递增，不用 `frame - initialFrame + 1`。 |
@@ -300,8 +307,33 @@ latAcceleration = xAcceleration * (-cos(theta)) + yAcceleration * sin(theta)
 | `orthoPxToMeter` | 像素到米比例估计值。 |
 | `quality` | 类别跳变、短轨迹、重复帧、整体缺帧比例、丢弃轨迹、插值、异常点、尺寸异常等质量统计。 |
 | `staticGate` | 静止门控参数、每条轨迹运动统计、被过滤轨迹列表。 |
+| `fragmentationFilter` | 疑似 ID 断裂过滤参数、策略、候选组、组内 raw ID、评分和删除数量。`full` 中 `use_fragmentation_filter=false`。 |
 
-## 八、conversion_log.txt
+## 八、id_mapping.csv 与 filter_report.csv
+
+`id_mapping.csv` 每个版本都会输出，字段顺序固定：
+
+```text
+dataset_id,version,raw_object_id,final_object_id,class_name_mode,start_frame,end_frame,total_frames,mean_confidence,is_kept,is_filtered,filter_type,filter_reason,fragmentation_group_id,quality_score
+```
+
+`raw_object_id` 是原始 pkl / `traj_info` 第 10 列中的 `object_id`。`final_object_id` 是当前版本重新分配后的最终 ID，也就是前端默认显示、筛选和跳转使用的 `object_id`，标准 CSV 中对应 `trackId`。被过滤的 raw tracklet 会在 `id_mapping.csv` 中保留记录，`final_object_id` 为空，并写明 `filter_type/filter_reason`。
+
+`filter_report.csv` 记录当前版本未保留的 raw tracklet，字段顺序固定：
+
+```text
+dataset_id,version,raw_object_id,filter_type,filter_reason,fragmentation_group_id,related_raw_object_ids,fragmentation_score,quality_score,start_frame,end_frame,total_frames,class_name_mode
+```
+
+疑似 ID 断裂组的统一删除原因是：
+
+```text
+suspected_id_fragmentation_drop_all_related_tracklets
+```
+
+该策略不会做 tracklet stitching，不会把两个 `raw_object_id` 合并成同一个最终 `object_id`，也不会保留 `quality_score` 最高或 `total_frames` 最长的片段。
+
+## 九、conversion_log.txt
 
 `conversion_log.txt` 记录转换过程中的关键日志，包括：
 
@@ -314,12 +346,13 @@ video_info 与 frameRate
 最终 trackId 数量
 类别轨迹统计
 静止过滤数量和被过滤 trackId
+疑似 ID 断裂过滤数量、fragmentation group、组内 raw_object_id、评分和删除策略
 类别跳变轨迹
 lane_id 为 -1 的数量
 重复帧、整体缺帧比例、丢弃轨迹、补全、异常点、尺寸异常等统计
 ```
 
-## 九、补全、修复和平滑逻辑
+## 十、补全、修复和平滑逻辑
 
 本节单独说明当前项目对轨迹数据的处理流程。
 
@@ -601,7 +634,7 @@ latAcceleration
 
 ### 9. full 到 moving_filtered 的过滤
 
-`moving_filtered` 不重新做清洗、补全和平滑，而是基于 `full` 已经生成的最终 `tracksMeta/tracks` 计算每条轨迹的运动指标：
+`moving_filtered` 不重新做清洗、补全和平滑，而是基于 `full` 已经生成的最终 `tracksMeta/tracks` 先执行疑似 ID 断裂组删除，再计算每条保留候选轨迹的运动指标：
 
 ```text
 displacement
@@ -612,13 +645,13 @@ max_speed
 static_ratio
 ```
 
-判定为整条轨迹静止的目标从 `moving_filtered` 删除。删除后，保留轨迹重新编号为连续 `trackId`，并同步更新 `tracksMeta.csv` 和 `tracks.csv`。如果车辆先运动后停车，因为整体空间活动范围会超过整轨静止阈值，会保留在 `moving_filtered` 中。`full` 版本中的静止车辆仍保留，但前端只绘制目标框，不绘制方向箭头。
+疑似断裂组和判定为整条轨迹静止的目标都会从 `moving_filtered` 删除。删除后，保留轨迹重新编号为连续 `trackId`，并同步更新 `tracksMeta.csv` 和 `tracks.csv`。如果车辆先运动后停车，因为整体空间活动范围会超过整轨静止阈值，会保留在 `moving_filtered` 中。`full` 版本中的静止车辆仍保留，但前端只绘制目标框，不绘制方向箭头。
 
-## 十、当前实现边界
+## 十一、当前实现边界
 
 需要特别注意当前代码的实际边界：
 
-1. 当前不会跨不同 `object_id` 做保守拼接，`stitched_track_count = 0`。
+1. 当前不会跨不同 `object_id` 做保守拼接，`stitched_track_count = 0`；疑似断裂只在 `moving_filtered` 中整组删除。
 2. 当前只修复孤立跳点；连续多帧异常不再触发轨迹拆分，只记录质量信息并由整体缺帧比例决定是否保留。
 3. `PCHIP` 插值函数存在，但缺失帧补全时通常只有前后两个端点，因此实际多为线性插值。
 4. `tracksMeta.csv` 中已取消 `meanWidth/meanLength` 字段；`width/length` 是与 `corrected_width/corrected_height` 同步的轨迹级稳定修正尺寸。

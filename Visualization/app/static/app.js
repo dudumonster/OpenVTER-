@@ -231,6 +231,7 @@ function normalizeTrack(row) {
     ...row,
     frame_id: frameId,
     object_id: objectId,
+    raw_object_id: asNumber(row.raw_object_id),
     confidence: asNumber(row.confidence),
     x1: asNumber(row.x1),
     y1: asNumber(row.y1),
@@ -261,6 +262,7 @@ function normalizeObject(row) {
   return {
     ...row,
     object_id: asNumber(row.object_id),
+    raw_object_id: asNumber(row.raw_object_id),
     start_frame: asNumber(row.start_frame),
     end_frame: asNumber(row.end_frame),
     displacement: asNumber(row.displacement),
@@ -925,6 +927,7 @@ function showObjectDetail(row) {
   els.detailContent.innerHTML = `
     <div class="detail-grid">
       <span>object_id</span><strong>${row.object_id}</strong>
+      <span>raw_object_id</span><strong>${row.raw_object_id === null ? "" : row.raw_object_id}</strong>
       <span>class</span><strong>${escapeHtml(row.class_name || "")}</strong>
       <span>frame</span><strong>${row.frame_id}</strong>
       <span>lane_id</span><strong>${row.lane_id === null ? "" : row.lane_id}</strong>

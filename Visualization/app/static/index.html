@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenVTER Trajectory Visualizer</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>OpenVTER 轨迹可视化</h1>
+          <p id="datasetSummary">等待数据集</p>
+        </div>
+        <div class="scan-controls">
+          <label class="check-row">
+            <input id="forceScan" type="checkbox" />
+            <span>覆盖已有</span>
+          </label>
+          <button id="scanButton" class="primary-button">重新扫描</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="control-panel">
+          <section>
+            <div class="section-title">数据集</div>
+            <input id="datasetSearch" class="text-input" type="text" placeholder="搜索数据集" />
+            <div id="datasetList" class="dataset-list"></div>
+          </section>
+
+          <section>
+            <div class="section-title">跳转与筛选</div>
+            <label class="field-label" for="objectInput">object_id</label>
+            <input id="objectInput" class="text-input" type="text" placeholder="留空显示全部目标" />
+            <label class="field-label" for="frameInput">frame_id</label>
+            <div class="inline-row">
+              <input id="frameInput" class="text-input" type="number" placeholder="留空保持当前帧" />
+              <button id="jumpButton" class="small-button">确认跳转</button>
+            </div>
+          </section>
+
+          <section>
+            <div class="section-title">类别筛选</div>
+            <div class="class-actions">
+              <button id="selectAllClasses" class="small-button">全选</button>
+              <button id="clearAllClasses" class="small-button">取消全选</button>
+              <span id="classSelectState" class="mini-status">未加载</span>
+            </div>
+            <div id="classFilters" class="class-filters"></div>
+          </section>
+
+          <section>
+            <div class="section-title">显示参数</div>
+            <label class="check-row"><input id="bboxToggle" type="checkbox" checked /><span>显示 bbox</span></label>
+            <label class="check-row"><input id="labelToggle" type="checkbox" checked /><span>显示 object_id</span></label>
+            <label class="check-row"><input id="laneToggle" type="checkbox" /><span>显示车道</span></label>
+            <label class="check-row"><input id="keepUnrelatedToggle" type="checkbox" checked /><span>保留无关区域</span></label>
+            <label class="field-label" for="trailRange">拖尾帧数 <span id="trailValue">50</span></label>
+            <input id="trailRange" type="range" min="0" max="160" value="50" />
+          </section>
+
+          <section>
+            <div class="section-title">目标详情</div>
+            <div id="detailContent" class="detail-content">悬停或点击目标</div>
+          </section>
+
+          <section>
+            <div class="section-title">转换状态</div>
+            <pre id="scanResult" class="scan-result"></pre>
+          </section>
+        </aside>
+
+        <section class="viewer-panel">
+          <div class="canvas-toolbar">
+            <div class="metrics">
+              <span id="frameMetric">帧 0 / 0</span>
+              <span id="objectMetric">目标 0</span>
+              <span id="statusText"></span>
+            </div>
+            <div class="playback">
+              <button id="prevButton" class="icon-button" title="上一帧">‹</button>
+              <button id="playButton" class="icon-button wide" title="播放/暂停">播放</button>
+              <button id="nextButton" class="icon-button" title="下一帧">›</button>
+              <select id="speedSelect" class="speed-select">
+                <option value="0.5">0.5x</option>
+                <option value="1" selected>1x</option>
+                <option value="2">2x</option>
+                <option value="5">5x</option>
+              </select>
+            </div>
+          </div>
+          <div class="canvas-wrap" id="canvasWrap">
+            <canvas id="trackCanvas"></canvas>
+            <div id="tooltip" class="tooltip hidden"></div>
+            <div id="emptyState" class="empty-state">选择或扫描数据集</div>
+          </div>
+          <input id="timeline" class="timeline" type="range" min="0" max="0" value="0" />
+          <div class="legend-bar">
+            <div class="section-title">Legend</div>
+            <div id="legendList" class="legend-list"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

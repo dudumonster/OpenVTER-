@@ -1,0 +1,28 @@
+{
+  "dataset_id": "cao_qiao_001",
+  "version": "moving_filtered",
+  "use_fragmentation_filter": true,
+  "fragmentation_filter_config": {
+    "enabled": true,
+    "min_gap_frames": 5,
+    "max_gap_frames": 100,
+    "min_track_frames": 5,
+    "score_threshold": 0.7,
+    "max_position_distance_base": 30.0,
+    "max_position_distance_gap_factor": 2.0,
+    "min_bbox_size_ratio": 0.4,
+    "max_bbox_size_ratio": 2.5,
+    "max_heading_diff_deg": 60.0,
+    "border_margin_px": 20.0,
+    "velocity_window_frames": 5,
+    "filter_strategy": "drop_all_suspected_fragments"
+  },
+  "fragmentation_filter_strategy": "drop_all_suspected_fragments",
+  "raw_track_count": 373,
+  "kept_track_count": 135,
+  "filtered_track_count": 238,
+  "fragmentation_filtered_count": 6,
+  "static_filtered_count": 11,
+  "id_mapping_file": "id_mapping.csv",
+  "filter_report_file": "filter_report.csv"
+}

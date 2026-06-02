@@ -33,6 +33,7 @@ const LANE_PALETTE = [
 ];
 const ROAD_MASK_COLOR = "rgba(0, 0, 0, 0.88)";
 const DEFAULT_TRAIL_LENGTH = 50;
+const STATIC_ARROW_SUPPRESSED_CLASSES = new Set(["car", "truck", "bus", "freight_car", "van", "motor", "tricycle", "awning-tricycle"]);
 const HEADING_CONFIG = {
   heading_smooth_window: 8,
   min_motion_threshold: 2.0,
@@ -239,6 +240,12 @@ function normalizeTrack(row) {
     cy: asNumber(row.cy),
     width: asNumber(row.width),
     height: asNumber(row.height),
+    raw_mean_width: asNumber(row.raw_mean_width),
+    raw_mean_height: asNumber(row.raw_mean_height),
+    corrected_width: asNumber(row.corrected_width),
+    corrected_height: asNumber(row.corrected_height),
+    missing_ratio: asNumber(row.missing_ratio),
+    is_interpolated: row.is_interpolated === true || row.is_interpolated === "true",
     angle_deg: asNumber(row.angle_deg),
     category_id: asNumber(row.category_id),
     lane_id: asNumber(row.lane_id),
@@ -258,6 +265,7 @@ function normalizeObject(row) {
     end_frame: asNumber(row.end_frame),
     displacement: asNumber(row.displacement),
     path_length: asNumber(row.path_length),
+    stationary_extent: asNumber(row.stationary_extent),
     mean_speed: asNumber(row.mean_speed),
     max_speed: asNumber(row.max_speed),
     static_ratio: asNumber(row.static_ratio),
@@ -488,9 +496,15 @@ function drawTarget(row) {
   ctx.save();
   if (els.bboxToggle.checked) drawBBox(row, style);
   else drawCenterPoint(center, style.color);
-  drawDirection(row, style.color);
+  if (shouldDrawDirection(row)) drawDirection(row, style.color);
   if (els.labelToggle.checked) drawLabel(row, center, style.color);
   ctx.restore();
+}
+
+function shouldDrawDirection(row) {
+  if (state.version !== "full") return true;
+  const obj = state.objectInfoMap.get(row.object_id);
+  return !(obj && obj.is_static && STATIC_ARROW_SUPPRESSED_CLASSES.has(row.class_name));
 }
 
 function drawBBox(row, style) {
@@ -572,10 +586,19 @@ function headingFor(row) {
 }
 
 function drawDirection(row, color) {
-  const rad = headingFor(row);
+  const longSide = boxLongSideInfo(row);
+  const motionRad = headingFor(row);
+  let rad = longSide ? longSide.angle : motionRad;
+  if (rad === null) return;
+
+  if (longSide && motionRad !== null) {
+    const dot = Math.cos(rad) * Math.cos(motionRad) + Math.sin(rad) * Math.sin(motionRad);
+    if (dot < 0) rad += Math.PI;
+  }
+
   if (rad === null) return;
   const center = worldToScreen(row.cx, row.cy);
-  const baseLen = targetLongSideScreenLength(row) * HEADING_CONFIG.arrow_length_scale;
+  const baseLen = (longSide ? longSide.length : targetLongSideScreenLength(row)) * HEADING_CONFIG.arrow_length_scale;
   const len = Math.max(HEADING_CONFIG.arrow_min_length, Math.min(HEADING_CONFIG.arrow_max_length, baseLen));
   const end = { x: center.x + Math.cos(rad) * len, y: center.y + Math.sin(rad) * len };
   ctx.beginPath();
@@ -593,15 +616,23 @@ function drawDirection(row, color) {
   ctx.fill();
 }
 
+function boxLongSideInfo(row) {
+  if (!hasQuad(row)) return null;
+  const points = quadPoints(row).map((point) => worldToScreen(point.x, point.y));
+  let best = null;
+  points.forEach((point, idx) => {
+    const next = points[(idx + 1) % points.length];
+    const dx = next.x - point.x;
+    const dy = next.y - point.y;
+    const length = Math.hypot(dx, dy);
+    if (!best || length > best.length) best = { angle: Math.atan2(dy, dx), length };
+  });
+  return best && best.length > 0 ? best : null;
+}
+
 function targetLongSideScreenLength(row) {
-  if (hasQuad(row)) {
-    const points = quadPoints(row).map((point) => worldToScreen(point.x, point.y));
-    const edges = points.map((point, idx) => {
-      const next = points[(idx + 1) % points.length];
-      return Math.hypot(next.x - point.x, next.y - point.y);
-    });
-    return Math.max(...edges, 0);
-  }
+  const longSide = boxLongSideInfo(row);
+  if (longSide) return longSide.length;
   if (row.x1 !== null && row.y1 !== null && row.x2 !== null && row.y2 !== null) {
     const a = worldToScreen(row.x1, row.y1);
     const b = worldToScreen(row.x2, row.y2);

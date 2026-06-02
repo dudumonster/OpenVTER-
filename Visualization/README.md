@@ -100,6 +100,8 @@ Visualization/Adjusted results/<folderName>/
 STATIC_GATE = {
     "min_track_length": 30,
     "max_displacement": 1.0,
+    "max_path_length": 2.0,
+    "max_stationary_extent": 2.0,
     "max_mean_speed": 0.2,
     "static_ratio_threshold": 0.8,
     "per_frame_motion_threshold": 0.05,
@@ -107,8 +109,17 @@ STATIC_GATE = {
 ```
 
 这些参数采用当前标准轨迹单位：位置为 m，速度为 m/s，逐帧位移阈值为 m/frame。过滤主要作用于 `car、truck、bus、freight_car、van、motor、tricycle、awning-tricycle`。
+静止过滤会把检测抖动造成的微小变化也当作静止处理：只要车辆 95% 轨迹点都落在很小范围内，就会从 `moving_filtered` 删除；不再依赖容易被少量异常点污染的首尾位移或累计路径作为必要条件。`full` 版本仍保留这些静止车辆，但可视化时不绘制方向箭头，只显示目标框。
 
 `quality_report.json` 会记录静止门控参数、每条 track 的运动统计、被过滤目标数量和原因。`conversion_log.txt` 也会记录被过滤的 `trackId`、类别、位移、累计路径、平均速度和静止比例。
+
+## 补帧与无向框修正
+
+当前转换按原始 `object_id` 的整体缺帧比例处理轨迹，不再按单个 gap 拆分。`MAX_MISSING_RATIO = 0.40`：超过阈值的轨迹整条丢弃；不超过阈值的轨迹会补齐 `min_frame` 到 `max_frame` 之间所有缺失帧。重复帧会保留最高置信度记录，并写入质量报告。
+
+过短轨迹会在生成 `full` 前统一丢弃：`pedestrian/people` 少于 90 帧删除，其他类别少于 150 帧删除。因此两个输出版本都不会保留这些短暂目标。
+
+无向框目标的最终 `width/length` 使用补帧前真实检测帧的稳定尺寸。`pedestrian` 使用稳定正方形框；其他无向框目标使用长边沿 `heading`、短边垂直 `heading` 的旋转框。可视化工具界面和控件不变，后端返回的四角点已使用修正尺寸与 heading 生成。
 
 ## 文件夹名称解析
 
@@ -168,16 +179,16 @@ recordingId,locationId,frameRate,numFrames,duration,numTracks,numVehicles,numVRU
 `<folderName>_tracksMeta.csv`：
 
 ```text
-recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,endXCenter,endYCenter,startLaneId,endLaneId,width,length,class
+recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,endXCenter,endYCenter,startLaneId,endLaneId,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,missing_ratio,class
 ```
 
 `<folderName>_tracks.csv`：
 
 ```text
-recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,length,xVelocity,yVelocity,xAcceleration,yAcceleration,lonVelocity,latVelocity,lonAcceleration,latAcceleration,centerX,centerY
+recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,is_interpolated,missing_ratio,xVelocity,yVelocity,xAcceleration,yAcceleration,lonVelocity,latVelocity,lonAcceleration,latAcceleration,centerX,centerY
 ```
 
-其中 `width` 和 `length` 是该轨迹清洗后的稳定平均宽度和长度，同一个 `trackId` 的宽度和长度保持稳定；`centerX = xCenter`，`centerY = yCenter`。
+其中 `width` 和 `length` 是该轨迹修正后的稳定宽度和长度，同一个 `trackId` 的宽度和长度保持稳定；`raw_mean_width/raw_mean_height` 记录补帧前真实检测帧尺寸统计，`corrected_width/corrected_height` 与可视化旋转框使用的尺寸同步；`centerX = xCenter`，`centerY = yCenter`。
 
 ## 启动当前可视化工具
 

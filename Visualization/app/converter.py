@@ -66,7 +66,14 @@ VRU_CLASSES = {"pedestrian", "people", "bicycle", "tricycle", "awning-tricycle",
 
 SHORT_GAP_MAX = 5
 MEDIUM_GAP_MAX = 15
-LONG_GAP_SPLIT = 30
+MAX_MISSING_RATIO = 0.40
+HEADING_SMOOTH_WINDOW = 5
+MIN_DISPLACEMENT_FOR_HEADING = 0.05
+SHORT_TRACK_MIN_FRAMES = {
+    "pedestrian": 90,
+    "people": 90,
+    "default": 150,
+}
 CONSECUTIVE_OUTLIER_SPLIT = 15
 
 PHYSICAL_LIMITS = {
@@ -97,6 +104,8 @@ CONFUSABLE_CLASS_GROUPS = [
 STATIC_GATE = {
     "min_track_length": 30,
     "max_displacement": 1.0,
+    "max_path_length": 2.0,
+    "max_stationary_extent": 2.0,
     "max_mean_speed": 0.2,
     "static_ratio_threshold": 0.8,
     "per_frame_motion_threshold": 0.05,
@@ -130,6 +139,12 @@ TRACKS_META_FIELDS = [
     "endLaneId",
     "width",
     "length",
+    "raw_mean_width",
+    "raw_mean_height",
+    "corrected_width",
+    "corrected_height",
+    "box_orientation_source",
+    "missing_ratio",
     "class",
 ]
 
@@ -144,6 +159,13 @@ TRACKS_FIELDS = [
     "heading",
     "width",
     "length",
+    "raw_mean_width",
+    "raw_mean_height",
+    "corrected_width",
+    "corrected_height",
+    "box_orientation_source",
+    "is_interpolated",
+    "missing_ratio",
     "xVelocity",
     "yVelocity",
     "xAcceleration",
@@ -431,14 +453,57 @@ def _expand_traj_info(data: Dict[str, Any], logger: logging.Logger, quality: Dic
     return rows, frame_meta, col_counts
 
 
-def _should_split(prev: Dict[str, Any], cur: Dict[str, Any], final_class: str, frame_rate: float) -> bool:
-    gap = int(cur["frame"]) - int(prev["frame"]) - 1
-    if gap > LONG_GAP_SPLIT:
-        return True
-    dt = max((int(cur["frame"]) - int(prev["frame"])) / frame_rate, 1.0 / frame_rate)
-    speed = _dist((prev["xCenter_raw"], prev["yCenter_raw"]), (cur["xCenter_raw"], cur["yCenter_raw"])) / dt
-    limit = PHYSICAL_LIMITS.get(final_class, PHYSICAL_LIMITS["car"])["max_speed"]
-    return speed > limit * 1.5
+def _confidence_key(row: Dict[str, Any]) -> Tuple[float, int]:
+    confidence = row.get("confidence")
+    if not _finite(confidence):
+        confidence = -math.inf
+    # Earlier rows win exact confidence ties to keep de-duplication stable.
+    return float(confidence), -int(row.get("source_row_index", 0))
+
+
+def _dedupe_track_frames(rows: List[Dict[str, Any]], object_id: int, logger: logging.Logger, quality: Dict[str, Any]) -> List[Dict[str, Any]]:
+    by_frame: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_frame[int(row["frame"])].append(row)
+
+    deduped: List[Dict[str, Any]] = []
+    for frame, frame_rows in sorted(by_frame.items()):
+        if len(frame_rows) > 1:
+            kept = max(frame_rows, key=_confidence_key)
+            msg = (
+                f"object_id={object_id} frame={frame}: duplicate detections={len(frame_rows)}; "
+                "kept highest confidence row for missing-ratio statistics."
+            )
+            logger.warning(msg)
+            quality["warnings"].append(msg)
+            quality["duplicate_frame_record_count"] += len(frame_rows) - 1
+            quality["duplicate_frame_tracks"].add(object_id)
+        else:
+            kept = frame_rows[0]
+        deduped.append(dict(kept))
+    return deduped
+
+
+def _track_missing_stats(object_id: int, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    frames = sorted({int(row["frame"]) for row in rows})
+    min_frame = frames[0]
+    max_frame = frames[-1]
+    expected = max_frame - min_frame + 1
+    observed = len(frames)
+    missing = max(expected - observed, 0)
+    ratio = missing / float(expected) if expected > 0 else 0.0
+    return {
+        "trackId": object_id,
+        "min_frame": min_frame,
+        "max_frame": max_frame,
+        "expected_frame_count": expected,
+        "observed_frame_count": observed,
+        "missing_frame_count": missing,
+        "missing_ratio": ratio,
+        "is_dropped": ratio > MAX_MISSING_RATIO,
+        "drop_reason": "missing_ratio_exceeded" if ratio > MAX_MISSING_RATIO else "",
+        "num_interpolated_frames": 0 if ratio > MAX_MISSING_RATIO else missing,
+    }
 
 
 def _split_raw_tracks(raw_rows: List[Dict[str, Any]], frame_rate: float, logger: logging.Logger, quality: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
@@ -446,31 +511,39 @@ def _split_raw_tracks(raw_rows: List[Dict[str, Any]], frame_rate: float, logger:
     for row in raw_rows:
         grouped[int(row["object_id"])].append(row)
 
-    fragments: List[List[Dict[str, Any]]] = []
+    tracks: List[List[Dict[str, Any]]] = []
     for object_id, rows in sorted(grouped.items()):
+        rows = _dedupe_track_frames(rows, object_id, logger, quality)
         rows = sorted(rows, key=lambda item: int(item["frame"]))
+        stats = _track_missing_stats(object_id, rows)
+        quality["track_missing_stats"].append(dict(stats))
+        if stats["missing_frame_count"] > 0:
+            quality["gap_tracks"].add(object_id)
+            quality["total_missing_frame_count"] += int(stats["missing_frame_count"])
+        if stats["is_dropped"]:
+            quality["dropped_track_count"] += 1
+            logger.info(
+                "object_id=%s dropped by missing_ratio %.4f > %.2f",
+                object_id,
+                stats["missing_ratio"],
+                MAX_MISSING_RATIO,
+            )
+            continue
+
         final_class, _, _, class_counts = _mode_class(rows, logger, f"object_id={object_id}", quality)
         if len(class_counts) > 1:
             quality["raw_object_category_jump_count"] += 1
-        current: List[Dict[str, Any]] = [rows[0]]
         for prev, cur in zip(rows[:-1], rows[1:]):
             gap = int(cur["frame"]) - int(prev["frame"]) - 1
             if gap > 0:
-                quality["gap_tracks"].add(object_id)
                 if gap <= SHORT_GAP_MAX:
                     quality["short_gap_count"] += gap
                 elif gap <= MEDIUM_GAP_MAX:
                     quality["medium_gap_count"] += gap
                 else:
                     quality["long_gap_count"] += gap
-            if _should_split(prev, cur, final_class, frame_rate):
-                fragments.append(current)
-                current = [cur]
-                quality["split_track_count"] += 1
-            else:
-                current.append(cur)
-        fragments.append(current)
-    return fragments
+        tracks.append(rows)
+    return tracks
 
 
 def _interpolate_values(frames: List[int], values: List[float], new_frames: List[int]) -> List[float]:
@@ -487,13 +560,6 @@ def _interpolate_between(prev: Dict[str, Any], cur: Dict[str, Any], final_class:
     gap = int(cur["frame"]) - int(prev["frame"]) - 1
     if gap <= 0:
         return []
-    if gap > SHORT_GAP_MAX:
-        dt = (int(cur["frame"]) - int(prev["frame"])) / frame_rate
-        speed = _dist((prev["xCenter_raw"], prev["yCenter_raw"]), (cur["xCenter_raw"], cur["yCenter_raw"])) / max(dt, 1.0 / frame_rate)
-        limit = PHYSICAL_LIMITS.get(final_class, PHYSICAL_LIMITS["car"])["max_speed"]
-        same_or_known_lane = prev["lane_id"] == cur["lane_id"] or prev["lane_id"] == -1 or cur["lane_id"] == -1
-        if gap > MEDIUM_GAP_MAX or speed > limit or not same_or_known_lane:
-            return []
 
     frames = [int(prev["frame"]), int(cur["frame"])]
     new_frames = list(range(frames[0] + 1, frames[1]))
@@ -614,9 +680,27 @@ def _differentiate(values: List[float], frames: List[int], frame_rate: float) ->
     return out
 
 
+def _smooth_angles_degrees(values: List[float], window: int) -> List[float]:
+    if len(values) < 3 or window <= 1:
+        return [float(v) % 360.0 for v in values]
+    half = max(1, window // 2)
+    out: List[float] = []
+    for i in range(len(values)):
+        start = max(0, i - half)
+        end = min(len(values), i + half + 1)
+        radians = np.radians(np.asarray(values[start:end], dtype=float))
+        sin_mean = float(np.mean(np.sin(radians)))
+        cos_mean = float(np.mean(np.cos(radians)))
+        if abs(sin_mean) < 1e-12 and abs(cos_mean) < 1e-12:
+            out.append(float(values[i]) % 360.0)
+        else:
+            out.append(math.degrees(math.atan2(sin_mean, cos_mean)) % 360.0)
+    return out
+
+
 def _compute_heading(xs: List[float], ys: List[float], rows: List[Dict[str, Any]], frame_rate: float, logger: logging.Logger, label: str) -> List[float]:
     n = len(xs)
-    half_window = max(1, int(round(0.25 * frame_rate)))
+    half_window = max(1, HEADING_SMOOTH_WINDOW // 2)
     headings: List[Optional[float]] = []
     last_valid: Optional[float] = None
     for i in range(n):
@@ -624,7 +708,7 @@ def _compute_heading(xs: List[float], ys: List[float], rows: List[Dict[str, Any]
         j1 = min(n - 1, i + half_window)
         dx = xs[j1] - xs[j0]
         dy = ys[j1] - ys[j0]
-        if math.hypot(dx, dy) >= 0.2:
+        if math.hypot(dx, dy) >= MIN_DISPLACEMENT_FOR_HEADING:
             last_valid = math.degrees(math.atan2(dx, dy)) % 360.0
             headings.append(last_valid)
         elif last_valid is not None:
@@ -636,7 +720,12 @@ def _compute_heading(xs: List[float], ys: List[float], rows: List[Dict[str, Any]
     if fallback is None:
         fallback = 0.0
         logger.warning("%s has no valid motion or bbox heading; heading fallback is 0.0.", label)
-    return [float(h if h is not None else fallback) for h in headings]
+    filled = [float(h if h is not None else fallback) for h in headings]
+    return _smooth_angles_degrees(filled, HEADING_SMOOTH_WINDOW)
+
+
+def _min_track_frames(final_class: str) -> int:
+    return int(SHORT_TRACK_MIN_FRAMES.get(final_class, SHORT_TRACK_MIN_FRAMES["default"]))
 
 
 def _estimate_ortho_px_to_meter(rows: List[Dict[str, Any]], logger: logging.Logger) -> Optional[float]:
@@ -680,22 +769,40 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
         _fill_nan_centers(fragment)
 
         with_gaps: List[Dict[str, Any]] = []
+        interpolated_in_track = 0
         for prev, cur in zip(fragment[:-1], fragment[1:]):
             with_gaps.append(prev)
             inserts = _interpolate_between(prev, cur, final_class, frame_rate)
-            if inserts:
-                quality["interpolated_frame_count"] += len(inserts)
+            interpolated_in_track += len(inserts)
             with_gaps.extend(inserts)
         with_gaps.append(fragment[-1])
         with_gaps = sorted(with_gaps, key=lambda item: int(item["frame"]))
+        min_frames = _min_track_frames(final_class)
+        if len(with_gaps) < min_frames:
+            quality["short_duration_dropped_track_count"] += 1
+            quality["short_duration_dropped_tracks"].append(
+                {
+                    "object_id": int(fragment[0]["object_id"]),
+                    "class": final_class,
+                    "numFrames": len(with_gaps),
+                    "min_required_frames": min_frames,
+                    "initialFrame": int(with_gaps[0]["frame"]),
+                    "finalFrame": int(with_gaps[-1]["frame"]),
+                    "drop_reason": "track_duration_too_short",
+                }
+            )
+            continue
+        quality["interpolated_frame_count"] += interpolated_in_track
         prepared.append(
             {
                 "rows": with_gaps,
+                "raw_rows": fragment,
                 "final_class": final_class,
                 "final_class_ratio": ratio,
                 "category_unstable": unstable,
                 "class_counts": class_counts,
                 "original_object_id": int(fragment[0]["object_id"]),
+                "missing_stats": _track_missing_stats(int(fragment[0]["object_id"]), fragment),
             }
         )
 
@@ -707,7 +814,7 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
     class_dim_values: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: {"widths": [], "lengths": []})
     track_payloads = []
     for item in prepared:
-        valid_w, valid_l = _valid_dimensions(item["rows"], quality)
+        valid_w, valid_l = _valid_dimensions(item["raw_rows"], quality)
         if valid_w and valid_l:
             class_dim_values[item["final_class"]]["widths"].extend(valid_w)
             class_dim_values[item["final_class"]]["lengths"].extend(valid_l)
@@ -727,8 +834,8 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
             mean_width = float(np.mean(valid_w))
             mean_length = float(np.mean(valid_l))
         else:
-            med_w = [row["raw_width"] for row in rows if _finite(row.get("raw_width"))]
-            med_l = [row["raw_length"] for row in rows if _finite(row.get("raw_length"))]
+            med_w = [row["raw_width"] for row in item["raw_rows"] if _finite(row.get("raw_width"))]
+            med_l = [row["raw_length"] for row in item["raw_rows"] if _finite(row.get("raw_length"))]
             if med_w and med_l:
                 mean_width = float(np.median(med_w))
                 mean_length = float(np.median(med_l))
@@ -739,6 +846,17 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
                 logger.warning("trackId %s has insufficient size data and no class fallback.", track_id)
         if _finite(mean_width) and _finite(mean_length) and mean_width > mean_length:
             mean_width, mean_length = mean_length, mean_width
+        raw_mean_width = mean_width
+        raw_mean_height = mean_length
+        if final_class == "pedestrian" and _finite(mean_width) and _finite(mean_length):
+            pedestrian_side = max(mean_width, mean_length)
+            corrected_width = pedestrian_side
+            corrected_height = pedestrian_side
+        else:
+            corrected_width = mean_width
+            corrected_height = mean_length
+        box_orientation_source = "heading_corrected_from_hbb"
+        missing_ratio = float(item["missing_stats"]["missing_ratio"])
 
         xs = _smooth_series([float(row["xCenter_raw"]) for row in rows], quality, f"trackId={track_id}")
         ys = _smooth_series([float(row["yCenter_raw"]) for row in rows], quality, f"trackId={track_id}")
@@ -764,8 +882,15 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
                     "xCenter": x,
                     "yCenter": y,
                     "heading": heading,
-                    "width": mean_width,
-                    "length": mean_length,
+                    "width": corrected_width,
+                    "length": corrected_height,
+                    "raw_mean_width": raw_mean_width,
+                    "raw_mean_height": raw_mean_height,
+                    "corrected_width": corrected_width,
+                    "corrected_height": corrected_height,
+                    "box_orientation_source": box_orientation_source,
+                    "is_interpolated": bool(row.get("is_interpolated", False)),
+                    "missing_ratio": missing_ratio,
                     "xVelocity": vx,
                     "yVelocity": vy,
                     "xAcceleration": ax,
@@ -791,8 +916,14 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
                 "endYCenter": ys[-1],
                 "startLaneId": int(rows[0].get("lane_id", -1)) if _finite(rows[0].get("lane_id", -1)) else -1,
                 "endLaneId": int(rows[-1].get("lane_id", -1)) if _finite(rows[-1].get("lane_id", -1)) else -1,
-                "width": mean_width,
-                "length": mean_length,
+                "width": corrected_width,
+                "length": corrected_height,
+                "raw_mean_width": raw_mean_width,
+                "raw_mean_height": raw_mean_height,
+                "corrected_width": corrected_width,
+                "corrected_height": corrected_height,
+                "box_orientation_source": box_orientation_source,
+                "missing_ratio": missing_ratio,
                 "class": final_class,
                 "_class_counts": item["class_counts"],
                 "_final_class_ratio": item["final_class_ratio"],
@@ -828,7 +959,20 @@ def _quality_template() -> Dict[str, Any]:
         "short_gap_count": 0,
         "medium_gap_count": 0,
         "long_gap_count": 0,
+        "total_missing_frame_count": 0,
         "interpolated_frame_count": 0,
+        "dropped_track_count": 0,
+        "duplicate_frame_record_count": 0,
+        "duplicate_frame_tracks": set(),
+        "track_missing_stats": [],
+        "missing_ratio_parameters": {"max_missing_ratio": MAX_MISSING_RATIO},
+        "short_track_filter_parameters": dict(SHORT_TRACK_MIN_FRAMES),
+        "short_duration_dropped_track_count": 0,
+        "short_duration_dropped_tracks": [],
+        "heading_parameters": {
+            "heading_smooth_window": HEADING_SMOOTH_WINDOW,
+            "min_displacement_for_heading": MIN_DISPLACEMENT_FOR_HEADING,
+        },
         "outlier_frame_count": 0,
         "split_track_count": 0,
         "stitched_track_count": 0,
@@ -885,10 +1029,17 @@ def _track_motion_metrics(track_meta: Dict[str, Any], rows: List[Dict[str, Any]]
         mean_speed = 0.0
         max_speed = 0.0
         static_ratio = 1.0
+        stationary_extent = 0.0
     else:
         displacement = _dist(points[0], points[-1])
         segment_distances = [_dist(a, b) for a, b in zip(points[:-1], points[1:])]
         path_length = float(sum(segment_distances))
+        xs = np.asarray([point[0] for point in points], dtype=float)
+        ys = np.asarray([point[1] for point in points], dtype=float)
+        median_x = float(np.median(xs))
+        median_y = float(np.median(ys))
+        radii = np.hypot(xs - median_x, ys - median_y)
+        stationary_extent = float(np.percentile(radii, 95) * 2.0) if radii.size else 0.0
         segment_speeds = []
         for dist, f0, f1 in zip(segment_distances, frames[:-1], frames[1:]):
             dt = max((f1 - f0) / frame_rate, 1.0 / frame_rate)
@@ -902,6 +1053,10 @@ def _track_motion_metrics(track_meta: Dict[str, Any], rows: List[Dict[str, Any]]
     signals = []
     if displacement <= float(STATIC_GATE["max_displacement"]):
         signals.append("low_displacement")
+    if path_length <= float(STATIC_GATE["max_path_length"]):
+        signals.append("low_path_length")
+    if stationary_extent <= float(STATIC_GATE["max_stationary_extent"]):
+        signals.append("low_stationary_extent")
     if mean_speed <= float(STATIC_GATE["max_mean_speed"]):
         signals.append("low_mean_speed")
     if static_ratio >= float(STATIC_GATE["static_ratio_threshold"]):
@@ -911,7 +1066,7 @@ def _track_motion_metrics(track_meta: Dict[str, Any], rows: List[Dict[str, Any]]
     is_static = (
         cls in set(STATIC_GATE["filter_classes"])
         and int(track_meta["numFrames"]) >= int(STATIC_GATE["min_track_length"])
-        and len(signals) >= 2
+        and "low_stationary_extent" in signals
     )
     return {
         "trackId": int(track_meta["trackId"]),
@@ -925,6 +1080,7 @@ def _track_motion_metrics(track_meta: Dict[str, Any], rows: List[Dict[str, Any]]
         "end_y": float(track_meta["endYCenter"]),
         "displacement": displacement,
         "path_length": path_length,
+        "stationary_extent": stationary_extent,
         "mean_speed": mean_speed,
         "max_speed": max_speed,
         "static_ratio": static_ratio,
@@ -1079,6 +1235,17 @@ def convert_dataset(
 
     fragments = _split_raw_tracks(raw_rows, frame_rate, logger, quality)
     tracks_meta, tracks_rows = _build_final_tracks(fragments, frame_rate, logger, quality)
+    missing_ratios = [float(item["missing_ratio"]) for item in quality["track_missing_stats"]]
+    quality["missing_ratio_summary"] = {
+        "raw_track_count": raw_object_count,
+        "kept_track_count": len(tracks_meta),
+        "missing_ratio_dropped_track_count": quality["dropped_track_count"],
+        "short_duration_dropped_track_count": quality["short_duration_dropped_track_count"],
+        "dropped_track_count": quality["dropped_track_count"] + quality["short_duration_dropped_track_count"],
+        "total_interpolated_frames": quality["interpolated_frame_count"],
+        "mean_missing_ratio": float(np.mean(missing_ratios)) if missing_ratios else 0.0,
+        "max_missing_ratio": float(np.max(missing_ratios)) if missing_ratios else 0.0,
+    }
     for row in tracks_meta:
         row["recordingId"] = recording_id
     for row in tracks_rows:
@@ -1114,13 +1281,14 @@ def convert_dataset(
         log_line(
             "INFO",
             "static_filtered trackId=%s class=%s frames=%s displacement=%.4f path_length=%.4f "
-            "mean_speed=%.4f static_ratio=%.4f reason=%s"
+            "stationary_extent=%.4f mean_speed=%.4f static_ratio=%.4f reason=%s"
             % (
                 item["trackId"],
                 item["class"],
                 item["total_frames"],
                 item["displacement"],
                 item["path_length"],
+                item.get("stationary_extent", 0.0),
                 item["mean_speed"],
                 item["static_ratio"],
                 item["filter_reason"],
@@ -1142,11 +1310,23 @@ def convert_dataset(
             % (item["track"], item["class_counts"], item["final_class"], item["final_class_ratio"]),
         )
     log_line("INFO", f"lane_id_minus_one_records={quality.get('lane_id_minus_one_records', 0)}")
+    log_line("INFO", f"missing_ratio_parameters={quality['missing_ratio_parameters']}")
+    log_line("INFO", f"heading_parameters={quality['heading_parameters']}")
+    log_line("INFO", f"short_track_filter_parameters={quality['short_track_filter_parameters']}")
+    log_line("INFO", f"raw_track_count={quality['missing_ratio_summary']['raw_track_count']}")
+    log_line("INFO", f"kept_track_count={quality['missing_ratio_summary']['kept_track_count']}")
+    log_line("INFO", f"missing_ratio_dropped_track_count={quality['missing_ratio_summary']['missing_ratio_dropped_track_count']}")
+    log_line("INFO", f"short_duration_dropped_track_count={quality['short_duration_dropped_track_count']}")
+    log_line("INFO", f"dropped_track_count={quality['missing_ratio_summary']['dropped_track_count']}")
+    log_line("INFO", f"duplicate_frame_record_count={quality['duplicate_frame_record_count']}")
     log_line("INFO", f"gap_track_count={len(quality['gap_tracks'])}")
+    log_line("INFO", f"total_missing_frames_before_interpolation={quality['total_missing_frame_count']}")
     log_line("INFO", f"short_gap_missing_frames={quality['short_gap_count']}")
     log_line("INFO", f"medium_gap_missing_frames={quality['medium_gap_count']}")
     log_line("INFO", f"long_gap_missing_frames={quality['long_gap_count']}")
     log_line("INFO", f"interpolated_frame_count={quality['interpolated_frame_count']}")
+    log_line("INFO", f"mean_missing_ratio={quality['missing_ratio_summary']['mean_missing_ratio']:.4f}")
+    log_line("INFO", f"max_missing_ratio={quality['missing_ratio_summary']['max_missing_ratio']:.4f}")
     log_line("INFO", f"outlier_frame_count={quality['outlier_frame_count']}")
     log_line("INFO", f"split_track_count={quality['split_track_count']}")
     log_line("INFO", f"stitched_track_count={quality['stitched_track_count']}")

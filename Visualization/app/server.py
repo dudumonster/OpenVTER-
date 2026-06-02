@@ -144,8 +144,8 @@ def _standard_bounds(tracks):
     for row in tracks:
         x = _float(row.get("xCenter"))
         y = _float(row.get("yCenter"))
-        width = _float(row.get("width"), 0.0) or 0.0
-        length = _float(row.get("length"), 0.0) or 0.0
+        width = _float(row.get("corrected_width"), _float(row.get("width"), 0.0) or 0.0) or 0.0
+        length = _float(row.get("corrected_height"), _float(row.get("length"), 0.0) or 0.0) or 0.0
         pad = max(width, length, 1.0)
         if x is not None and y is not None:
             xs.extend([x - pad, x + pad])
@@ -160,8 +160,8 @@ def _standard_bounds(tracks):
 def _standard_bounds_from_meta(tracks_meta):
     xs, ys = [], []
     for row in tracks_meta:
-        width = _float(row.get("width"), 0.0) or 0.0
-        length = _float(row.get("length"), 0.0) or 0.0
+        width = _float(row.get("corrected_width"), _float(row.get("width"), 0.0) or 0.0) or 0.0
+        length = _float(row.get("corrected_height"), _float(row.get("length"), 0.0) or 0.0) or 0.0
         pad = max(width, length, 1.0)
         for x_key, y_key in (("startXCenter", "startYCenter"), ("endXCenter", "endYCenter")):
             x = _float(row.get(x_key))
@@ -253,8 +253,8 @@ def _standard_tracks(dataset_dir: Path):
         cy_src = _float(row.get("yCenter"))
         if cx_src is None or cy_src is None:
             continue
-        width = _float(row.get("width"), 1.0) or 1.0
-        length = _float(row.get("length"), width) or width
+        width = _float(row.get("corrected_width"), _float(row.get("width"), 1.0) or 1.0) or 1.0
+        length = _float(row.get("corrected_height"), _float(row.get("length"), width) or width) or width
         if world_to_pixel is not None:
             center = _world_to_pixel_point(cx_src, cy_src, world_to_pixel)
             quad = _oriented_box_pixel(cx_src, cy_src, width, length, row.get("heading"), world_to_pixel)
@@ -277,6 +277,13 @@ def _standard_tracks(dataset_dir: Path):
             "cy": center["y"],
             "width": width,
             "height": length,
+            "raw_mean_width": row.get("raw_mean_width"),
+            "raw_mean_height": row.get("raw_mean_height"),
+            "corrected_width": row.get("corrected_width") or width,
+            "corrected_height": row.get("corrected_height") or length,
+            "box_orientation_source": row.get("box_orientation_source", ""),
+            "is_interpolated": row.get("is_interpolated", ""),
+            "missing_ratio": row.get("missing_ratio", ""),
             "angle_deg": row.get("heading"),
             "lane_id": row.get("lane_id"),
             "source_xCenter": row.get("xCenter"),
@@ -312,6 +319,7 @@ def _standard_objects(dataset_dir: Path):
                 "endLaneId": row.get("endLaneId"),
                 "displacement": metric.get("displacement", ""),
                 "path_length": metric.get("path_length", ""),
+                "stationary_extent": metric.get("stationary_extent", ""),
                 "mean_speed": metric.get("mean_speed", ""),
                 "max_speed": metric.get("max_speed", ""),
                 "static_ratio": metric.get("static_ratio", ""),

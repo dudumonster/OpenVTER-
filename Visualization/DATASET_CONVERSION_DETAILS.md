@@ -84,6 +84,8 @@ Visualization/Adjusted results/<folderName>/
 STATIC_GATE = {
     "min_track_length": 30,
     "max_displacement": 1.0,
+    "max_path_length": 2.0,
+    "max_stationary_extent": 2.0,
     "max_mean_speed": 0.2,
     "static_ratio_threshold": 0.8,
     "per_frame_motion_threshold": 0.05,
@@ -94,7 +96,7 @@ STATIC_GATE = {
 单位说明：
 
 ```text
-displacement / path_length / per_frame_motion_threshold: m
+displacement / path_length / stationary_extent / per_frame_motion_threshold: m
 mean_speed / max_speed: m/s
 ```
 
@@ -102,10 +104,10 @@ mean_speed / max_speed: m/s
 
 1. 轨迹类别必须属于 `filter_classes`。
 2. `numFrames >= min_track_length`。
-3. 以下三个静止信号至少满足两个：
-   - `displacement <= max_displacement`
-   - `mean_speed <= max_mean_speed`
-   - `static_ratio >= static_ratio_threshold`
+3. 必须满足 `stationary_extent <= max_stationary_extent`，也就是整条轨迹的绝大多数点都停在很小空间范围内。`stationary_extent` 使用轨迹点到中位中心点距离的 95% 分位数乘以 2，避免少量异常点污染首尾位移，也避免把逐帧检测抖动累计成很长的假路径。
+4. `displacement <= max_displacement`、`mean_speed <= max_mean_speed`、`static_ratio >= static_ratio_threshold`、`path_length <= max_path_length` 仍会记录到 `filter_reason`，但不再作为最终是否删除的必要条件。
+
+因此，前段有明确运动、后段停车的车辆通常会因为空间活动范围超过阈值而保留；从头到尾基本在小范围内抖动的停放/静止机动车会从 `moving_filtered` 删除。
 
 `static_ratio` 的计算方式是：相邻记录中心点位移小于等于 `per_frame_motion_threshold` 的比例。
 
@@ -153,7 +155,7 @@ recordingId,locationId,frameRate,numFrames,duration,numTracks,numVehicles,numVRU
 字段顺序固定：
 
 ```text
-recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,endXCenter,endYCenter,startLaneId,endLaneId,width,length,class
+recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,endXCenter,endYCenter,startLaneId,endLaneId,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,missing_ratio,class
 ```
 
 字段说明：
@@ -171,8 +173,14 @@ recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,
 | `endYCenter` | 该轨迹最后一条输出记录的平滑后 `yCenter`。 |
 | `startLaneId` | 第一条输出记录的 `lane_id`。无法判断时为 `-1`。 |
 | `endLaneId` | 最后一条输出记录的 `lane_id`。无法判断时为 `-1`。 |
-| `width` | 轨迹级稳定宽度，单位 m。来自该轨迹有效 `raw_width` 的均值；如果有效尺寸不足，则依次 fallback 到轨迹尺寸中位数、同类别平均尺寸、空值。 |
-| `length` | 轨迹级稳定长度，单位 m。来自该轨迹有效 `raw_length` 的均值；fallback 逻辑同 `width`。保证 `length >= width`。 |
+| `width` | 最终导出和可视化使用的修正后宽度，单位 m。对无向框目标使用稳定尺寸，不使用逐帧抖动尺寸。 |
+| `length` | 最终导出和可视化使用的修正后长度，单位 m。除 `pedestrian` 外，长边沿 `heading` 方向。 |
+| `raw_mean_width` | 补帧前真实检测帧中有效 `raw_width` 的轨迹级统计值，fallback 同尺寸统计逻辑。 |
+| `raw_mean_height` | 补帧前真实检测帧中有效 `raw_length` 的轨迹级统计值，字段名保留 height 语义。 |
+| `corrected_width` | 无向框旋转修正后的宽度；当前与 `width` 同步输出。 |
+| `corrected_height` | 无向框旋转修正后的高度/长度；当前与 `length` 同步输出。 |
+| `box_orientation_source` | 框方向来源。当前无向水平框修正为 `heading_corrected_from_hbb`。 |
+| `missing_ratio` | 该原始 `object_id` 基于补帧前唯一帧号统计的整体缺帧比例。 |
 | `class` | 轨迹最终类别。按该最终轨迹真实检测帧的 `raw_class` 众数确定，不统计插值帧。 |
 
 类别众数规则：
@@ -188,7 +196,7 @@ recordingId,trackId,initialFrame,finalFrame,numFrames,startXCenter,startYCenter,
 字段顺序固定：
 
 ```text
-recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,length,xVelocity,yVelocity,xAcceleration,yAcceleration,lonVelocity,latVelocity,lonAcceleration,latAcceleration,centerX,centerY
+recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,length,raw_mean_width,raw_mean_height,corrected_width,corrected_height,box_orientation_source,is_interpolated,missing_ratio,xVelocity,yVelocity,xAcceleration,yAcceleration,lonVelocity,latVelocity,lonAcceleration,latAcceleration,centerX,centerY
 ```
 
 字段说明：
@@ -203,8 +211,13 @@ recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,le
 | `xCenter` | 世界四点框中心点经过异常修复、插值补全、Savitzky-Golay 平滑后的 x 坐标，单位 m。 |
 | `yCenter` | 世界四点框中心点经过异常修复、插值补全、Savitzky-Golay 平滑后的 y 坐标，单位 m。 |
 | `heading` | 基于平滑后的中心点计算，单位 deg。定义为 `0° -> +Y, 90° -> +X, 180° -> -Y, 270° -> -X`。 |
-| `width` | 该 `trackId` 的轨迹级稳定宽度，所有帧相同，单位 m。 |
-| `length` | 该 `trackId` 的轨迹级稳定长度，所有帧相同，单位 m。 |
+| `width` | 该 `trackId` 的修正后稳定宽度，所有帧相同，单位 m。 |
+| `length` | 该 `trackId` 的修正后稳定长度，所有帧相同，单位 m。 |
+| `raw_mean_width/raw_mean_height` | 补帧前真实检测帧的轨迹级尺寸统计，便于追溯修正前尺寸来源。 |
+| `corrected_width/corrected_height` | 可视化和导出旋转框使用的修正后尺寸，与 `width/length` 同步。 |
+| `box_orientation_source` | 当前无向框修正来源为 `heading_corrected_from_hbb`。 |
+| `is_interpolated` | 当前记录是否由缺失帧插值生成。 |
+| `missing_ratio` | 该轨迹补帧前的整体缺帧比例。 |
 | `xVelocity` | 基于平滑后 `xCenter` 对真实时间差分得到，单位 m/s。 |
 | `yVelocity` | 基于平滑后 `yCenter` 对真实时间差分得到，单位 m/s。 |
 | `xAcceleration` | 基于 `xVelocity` 对真实时间差分得到，单位 m/s²。 |
@@ -221,7 +234,7 @@ recordingId,trackId,lane_id,frame,trackLifetime,xCenter,yCenter,heading,width,le
 使用平滑后的中心点 `xCenter/yCenter`。对第 `i` 条记录：
 
 ```python
-half_window = round(0.25 * frameRate)
+half_window = HEADING_SMOOTH_WINDOW // 2
 j0 = max(0, i - half_window)
 j1 = min(n - 1, i + half_window)
 dx = xSmooth[j1] - xSmooth[j0]
@@ -231,7 +244,7 @@ dy = ySmooth[j1] - ySmooth[j0]
 如果：
 
 ```python
-sqrt(dx * dx + dy * dy) >= 0.2
+sqrt(dx * dx + dy * dy) >= MIN_DISPLACEMENT_FOR_HEADING
 ```
 
 则：
@@ -240,7 +253,14 @@ sqrt(dx * dx + dy * dy) >= 0.2
 heading = degrees(atan2(dx, dy)) % 360
 ```
 
-如果位移不足 0.2 m，则沿用上一帧有效 heading。若该轨迹前面也没有有效 heading，则使用世界四点框长边方向作为 fallback；仍无法计算时填 `0.0` 并写 warning。
+当前参数为：
+
+```python
+HEADING_SMOOTH_WINDOW = 5
+MIN_DISPLACEMENT_FOR_HEADING = 0.05
+```
+
+如果位移不足阈值，则沿用上一帧有效 heading。若该轨迹前面也没有有效 heading，则使用世界四点框长边方向作为 fallback；仍无法计算时填 `0.0` 并写 warning。最终 heading 序列会使用 sin/cos 方式做窗口平滑，避免 0°/360° 跨界时直接平均角度数值。
 
 ### 速度与加速度
 
@@ -278,7 +298,7 @@ latAcceleration = xAcceleration * (-cos(theta)) + yAcceleration * sin(theta)
 | `classTrackCounts` | 当前版本各类别轨迹数量。 |
 | `numVehicles/numVRUs` | 当前版本车辆与 VRU 轨迹数量。 |
 | `orthoPxToMeter` | 像素到米比例估计值。 |
-| `quality` | 类别跳变、短轨迹、跳帧、插值、异常点、尺寸异常等质量统计。 |
+| `quality` | 类别跳变、短轨迹、重复帧、整体缺帧比例、丢弃轨迹、插值、异常点、尺寸异常等质量统计。 |
 | `staticGate` | 静止门控参数、每条轨迹运动统计、被过滤轨迹列表。 |
 
 ## 八、conversion_log.txt
@@ -296,7 +316,7 @@ video_info 与 frameRate
 静止过滤数量和被过滤 trackId
 类别跳变轨迹
 lane_id 为 -1 的数量
-跳帧、补全、异常点、拆分、尺寸异常等统计
+重复帧、整体缺帧比例、丢弃轨迹、补全、异常点、尺寸异常等统计
 ```
 
 ## 九、补全、修复和平滑逻辑
@@ -348,27 +368,50 @@ raw_length = max(edge_a, edge_b)
 
 如果世界坐标不是有限数，则该行跳过并记录统计。缺失 `object_id` 的行也会跳过并记录 warning。
 
-### 2. 原始轨迹分组与拆分
+### 2. 原始轨迹分组、去重与缺帧比例判断
 
-先按原始 `object_id` 分组，再按 `frame` 排序。每个原始组会根据以下规则拆分成轨迹片段：
+先按原始 `object_id` 分组，再按 `frame` 排序。当前版本不再因为单个 gap 过大或局部速度异常而拆分轨迹；同一个 `object_id` 会作为一个整体评估。
 
-1. 相邻记录缺失帧数 `gap > LONG_GAP_SPLIT`，当前值为 30，则拆分。
-2. 相邻两点所需速度超过该类别 `max_speed * 1.5`，则拆分。
+如果同一 `object_id` 在同一帧出现多条记录，转换阶段会保留 `confidence` 最高的一条，并在 `quality.warnings`、`duplicate_frame_record_count`、`duplicate_frame_tracks` 中记录。缺帧统计使用去重后的唯一帧号，重复帧不会被重复计数。
 
-类别物理速度阈值来自 `PHYSICAL_LIMITS`，例如：
+对每个原始 `object_id` 统计：
 
-```text
-car/truck/bus/van/freight_car: max_speed = 25.0 m/s
-motor: 20.0 m/s
-bicycle/tricycle/awning-tricycle: 12.0 m/s
-pedestrian/people: 6.0 m/s
+```python
+min_frame = first observed frame
+max_frame = last observed frame
+expected_frame_count = max_frame - min_frame + 1
+observed_frame_count = unique observed frame count
+missing_frame_count = expected_frame_count - observed_frame_count
+missing_ratio = missing_frame_count / expected_frame_count
 ```
 
-注意：当前代码没有执行跨不同 `object_id` 的保守拼接，`stitched_track_count` 固定记录为 0。
+当前阈值：
+
+```python
+MAX_MISSING_RATIO = 0.40
+```
+
+处理规则：
+
+| 条件 | 当前处理 |
+| --- | --- |
+| `missing_ratio > 0.40` | 丢弃整条原始轨迹，不进入最终 CSV。`drop_reason = "missing_ratio_exceeded"`。 |
+| `missing_ratio <= 0.40` | 保留整条轨迹，并补齐 `min_frame` 到 `max_frame` 之间所有缺失帧。 |
+
+`quality.track_missing_stats` 会按原始 `object_id` 记录 `trackId、min_frame、max_frame、expected_frame_count、observed_frame_count、missing_frame_count、missing_ratio、is_dropped、drop_reason、num_interpolated_frames`。`stitched_track_count` 仍固定记录为 0。
+
+整体缺帧比例通过后，还会执行短轨迹过滤。该过滤发生在 `full` 输出生成之前，因此 `full` 和 `moving_filtered` 都不会保留这些短暂目标：
+
+| 类别 | 最小保留帧数 |
+| --- | --- |
+| `pedestrian` / `people` | 90 |
+| 其他类别 | 150 |
+
+低于阈值的轨迹会记录到 `quality.short_duration_dropped_tracks`，`drop_reason = "track_duration_too_short"`。
 
 ### 3. 类别修正
 
-每个轨迹片段会重新计算最终类别：
+每个保留轨迹会重新计算最终类别：
 
 ```text
 最终 class = 非插值真实检测帧 raw_class 的众数类别
@@ -405,7 +448,7 @@ yCenter_raw = NaN
 
 ### 5. 缺失帧补全
 
-补全发生在同一轨迹片段内部相邻两条记录之间。
+补全发生在同一保留轨迹内部相邻两条真实检测记录之间。轨迹是否保留只由整体 `missing_ratio` 决定，不再由单个 gap 长度决定。
 
 缺失帧数：
 
@@ -415,12 +458,11 @@ gap = frame_next - frame_prev - 1
 
 处理规则：
 
-| gap 范围 | 当前处理 |
+| 条件 | 当前处理 |
 | --- | --- |
 | `gap <= 0` | 不补全。 |
-| `1 <= gap <= 5` | 直接补全。 |
-| `6 <= gap <= 15` | 只有当前后位置速度不超过类别 `max_speed`，且 lane 相同或至少一端 lane 为 `-1` 时补全。 |
-| `gap > 15` | 不补全。 |
+| `gap > 0` 且该轨迹 `missing_ratio <= MAX_MISSING_RATIO` | 无论 gap 长短，都补齐中间所有缺失帧。 |
+| 该轨迹 `missing_ratio > MAX_MISSING_RATIO` | 整条轨迹已在分组阶段丢弃，不进入补全。 |
 
 补全字段处理：
 
@@ -431,7 +473,7 @@ gap = frame_next - frame_prev - 1
 | `xCenter_raw/yCenter_raw` | 对前后中心点插值。当前只有两端点，因此实际使用线性插值；如果可用点数达到 3 且 scipy 可用，函数支持 PCHIP。 |
 | `raw_width/raw_length` | 对前后尺寸线性插值，并保持 `raw_length >= raw_width`。 |
 | `lane_id` | 前后 lane 一致则使用该 lane；不同则按缺失帧更靠近前端或后端选择。无法判断时为 `-1`。 |
-| `raw_class` | 使用该轨迹片段的最终众数类别。 |
+| `raw_class` | 使用该轨迹的最终众数类别。 |
 | `category_id` | 设为空。 |
 | `confidence` | 设为 NaN，CSV 中为空。 |
 | `is_interpolated` | 设为 True。 |
@@ -455,7 +497,7 @@ latAcceleration
 
 ### 6. 尺寸异常剔除
 
-最终 `width/length` 不使用某一帧瞬时尺寸，而是轨迹级稳定尺寸。
+最终 `width/length` 不使用某一帧瞬时尺寸，而是轨迹级稳定尺寸。尺寸统计只基于补帧之前的真实检测帧，不使用插值补出来的记录重新计算均值。
 
 先对该轨迹所有有效 `raw_width/raw_length` 计算中位数：
 
@@ -481,6 +523,15 @@ raw_length < 0.4 * median_length
 2. 如果有效尺寸不足，使用该轨迹尺寸中位数。
 3. 如果仍不足，使用同类别轨迹尺寸均值。
 4. 如果仍无法计算，填空值并写 warning。
+
+无向框旋转修正规则：
+
+| 类别 | 修正尺寸 |
+| --- | --- |
+| `pedestrian` | `width = length = max(raw_mean_width, raw_mean_height)`，以中心点为中心按 `heading` 旋转显示。 |
+| 其他无向框目标 | `width = short_side`，`length = long_side`，其中 `long_side` 沿 `heading`，`short_side` 垂直 `heading`。 |
+
+当前标准 CSV 中 `width/length` 与 `corrected_width/corrected_height` 同步。后端可视化 API 优先读取修正字段生成四角点，因此前端界面不变，只是无向框按 heading 显示为旋转框。
 
 ### 7. 中心点平滑
 
@@ -555,19 +606,20 @@ latAcceleration
 ```text
 displacement
 path_length
+stationary_extent
 mean_speed
 max_speed
 static_ratio
 ```
 
-判定为静止的轨迹从 `moving_filtered` 删除。删除后，保留轨迹重新编号为连续 `trackId`，并同步更新 `tracksMeta.csv` 和 `tracks.csv`。
+判定为整条轨迹静止的目标从 `moving_filtered` 删除。删除后，保留轨迹重新编号为连续 `trackId`，并同步更新 `tracksMeta.csv` 和 `tracks.csv`。如果车辆先运动后停车，因为整体空间活动范围会超过整轨静止阈值，会保留在 `moving_filtered` 中。`full` 版本中的静止车辆仍保留，但前端只绘制目标框，不绘制方向箭头。
 
 ## 十、当前实现边界
 
 需要特别注意当前代码的实际边界：
 
 1. 当前不会跨不同 `object_id` 做保守拼接，`stitched_track_count = 0`。
-2. 当前只修复孤立跳点；连续多帧异常主要通过拆分和日志记录处理。
+2. 当前只修复孤立跳点；连续多帧异常不再触发轨迹拆分，只记录质量信息并由整体缺帧比例决定是否保留。
 3. `PCHIP` 插值函数存在，但缺失帧补全时通常只有前后两个端点，因此实际多为线性插值。
-4. `tracksMeta.csv` 中已取消 `meanWidth/meanLength` 字段；`width/length` 就是轨迹级稳定平均尺寸。
+4. `tracksMeta.csv` 中已取消 `meanWidth/meanLength` 字段；`width/length` 是与 `corrected_width/corrected_height` 同步的轨迹级稳定修正尺寸。
 5. `moving_filtered` 只是额外过滤版本，不会修改 `full` 的完整结果。

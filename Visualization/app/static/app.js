@@ -835,6 +835,12 @@ function applyInputs() {
     }
     state.objectFilter = String(objectId);
     state.selectedObject = objectId;
+    if (!frameText) {
+      const rows = state.objectMap.get(objectId) || [];
+      if (rows.length) state.currentFrame = clampFrame(rows[0].frame_id);
+      state.lastTick = 0;
+      state.frameAccumulator = 0;
+    }
   }
 
   if (frameText) {
@@ -850,7 +856,7 @@ function applyInputs() {
   }
 
   if (objectText && frameText) setStatus(`显示 object_id ${state.objectFilter}，跳转到第 ${state.currentFrame} 帧`);
-  else if (objectText) setStatus(`显示 object_id ${state.objectFilter}`);
+  else if (objectText) setStatus(`显示 object_id ${state.objectFilter}，跳转到首次出现帧 ${state.currentFrame}`);
   else if (frameText) setStatus(`跳转到第 ${state.currentFrame} 帧`);
   draw();
 }

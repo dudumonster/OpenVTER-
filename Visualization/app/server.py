@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import math
 import mimetypes
 import pickle
@@ -16,29 +17,39 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from converter import DEFAULT_ADJUSTED_ROOT, DEFAULT_INITIAL_ROOT, convert_all
+from converter import DEFAULT_ADJUSTED_ROOT, DEFAULT_FINAL_ROOT, DEFAULT_INITIAL_ROOT, convert_all
 
 
 APP_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = APP_ROOT / "static"
 VIS_ROOT = APP_ROOT.parent
+DEFAULT_VISUALIZER_LOG_PATH = VIS_ROOT / "logs" / "visualization_server.log"
+VISUALIZER_LOGGER = logging.getLogger("openvter_visualizer")
+
+
+def configure_visualizer_logger(log_path: Path = DEFAULT_VISUALIZER_LOG_PATH) -> logging.Logger:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("openvter_visualizer")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    return logger
 
 
 def _safe_dataset_path(dataset_id: str, version: str) -> Path:
     if (
         not dataset_id
-        or not version
         or "/" in dataset_id
         or "\\" in dataset_id
         or ".." in dataset_id
-        or "/" in version
-        or "\\" in version
-        or ".." in version
     ):
         raise ValueError("Invalid dataset id.")
-    path = (DEFAULT_ADJUSTED_ROOT / dataset_id / version).resolve()
-    if DEFAULT_ADJUSTED_ROOT.resolve() not in path.parents and path != DEFAULT_ADJUSTED_ROOT.resolve():
-        raise ValueError("Dataset path escapes Adjusted results.")
+    path = (DEFAULT_FINAL_ROOT / dataset_id).resolve()
+    if DEFAULT_FINAL_ROOT.resolve() not in path.parents and path != DEFAULT_FINAL_ROOT.resolve():
+        raise ValueError("Dataset path escapes Final Data.")
     return path
 
 
@@ -53,7 +64,7 @@ def _csv_records(path: Path):
 
 
 def _standard_paths(dataset_dir: Path):
-    dataset_id = dataset_dir.parent.name
+    dataset_id = dataset_dir.name
     return {
         "recording": dataset_dir / f"{dataset_id}_recordingMeta.csv",
         "tracks_meta": dataset_dir / f"{dataset_id}_tracksMeta.csv",
@@ -98,6 +109,11 @@ def _image_dimensions(path: Path):
 def _is_standard_dataset(dataset_dir: Path) -> bool:
     paths = _standard_paths(dataset_dir)
     return paths["recording"].exists() and paths["tracks_meta"].exists() and paths["tracks"].exists()
+
+
+def _missing_standard_files(dataset_dir: Path):
+    paths = _standard_paths(dataset_dir)
+    return [path.name for key, path in paths.items() if key != "quality" and not path.exists()]
 
 
 def _is_legacy_dataset(dataset_dir: Path) -> bool:
@@ -223,12 +239,10 @@ def _standard_metadata(dataset_id: str, version: str, dataset_dir: Path):
     static_gate = quality.get("staticGate", {})
     fragmentation = quality.get("fragmentationFilter", {})
     filtered_count = 0
-    if version == "moving_filtered":
-        filtered_count = (static_gate.get("filtered_track_count", 0) or 0) + (fragmentation.get("filtered_track_count", 0) or 0)
     return {
         "dataset_id": dataset_id,
         "version": version,
-        "display_name": f"{dataset_id} / {version}",
+        "display_name": dataset_id,
         "fps": _float(recording.get("frameRate"), 29.97),
         "total_frames": _int(recording.get("numFrames"), 0),
         "image_width": size["width"],
@@ -239,7 +253,7 @@ def _standard_metadata(dataset_id: str, version: str, dataset_dir: Path):
         "full_object_count": quality.get("staticGate", {}).get("original_track_count", len(tracks_meta)),
         "filtered_object_count": filtered_count,
         "fragmentation_filtered_count": fragmentation.get("filtered_track_count", 0),
-        "static_filtered_count": static_gate.get("filtered_track_count", 0) if version == "moving_filtered" else 0,
+        "static_filtered_count": static_gate.get("filtered_track_count", 0),
         "class_names": classes,
         "warnings": quality.get("quality", {}).get("warnings", []),
         "coordinate_system": "standard_pixel_background" if background_size else "standard_world_meter_view",
@@ -248,7 +262,7 @@ def _standard_metadata(dataset_id: str, version: str, dataset_dir: Path):
 
 def _standard_tracks(dataset_dir: Path):
     _, tracks_meta, tracks, _ = _standard_source(dataset_dir)
-    dataset_id = dataset_dir.parent.name
+    dataset_id = dataset_dir.name
     class_by_track = {row.get("trackId"): row.get("class") or "unknown" for row in tracks_meta}
     raw_by_track = {row.get("trackId"): row.get("raw_object_id") or row.get("trackId") for row in tracks_meta}
     bounds = _standard_bounds(tracks)
@@ -264,9 +278,11 @@ def _standard_tracks(dataset_dir: Path):
         if world_to_pixel is not None:
             center = _world_to_pixel_point(cx_src, cy_src, world_to_pixel)
             quad = _oriented_box_pixel(cx_src, cy_src, width, length, row.get("heading"), world_to_pixel)
+            heading_screen_rad = _heading_screen_angle(cx_src, cy_src, row.get("heading"), transform=world_to_pixel)
         else:
             center = _view_point(cx_src, cy_src, bounds)
             quad = _oriented_box(cx_src, cy_src, width, length, row.get("heading"), bounds)
+            heading_screen_rad = _heading_screen_angle(cx_src, cy_src, row.get("heading"), bounds=bounds)
         xs = [p["x"] for p in quad]
         ys = [p["y"] for p in quad]
         item = {
@@ -292,6 +308,7 @@ def _standard_tracks(dataset_dir: Path):
             "is_interpolated": row.get("is_interpolated", ""),
             "missing_ratio": row.get("missing_ratio", ""),
             "angle_deg": row.get("heading"),
+            "heading_screen_rad": heading_screen_rad,
             "lane_id": row.get("lane_id"),
             "source_xCenter": row.get("xCenter"),
             "source_yCenter": row.get("yCenter"),
@@ -314,7 +331,7 @@ def _standard_objects(dataset_dir: Path):
         metric = metrics.get(str(track_id), {})
         out.append(
             {
-                "dataset_id": dataset_dir.parent.name,
+                "dataset_id": dataset_dir.name,
                 "object_id": track_id,
                 "raw_object_id": row.get("raw_object_id") or track_id,
                 "class_name": row.get("class"),
@@ -342,15 +359,15 @@ def _standard_frames(dataset_dir: Path):
     recording, _, tracks, _ = _standard_source(dataset_dir)
     bounds = _standard_bounds(tracks)
     size = _view_size(bounds)
-    background_size = _image_dimensions(_background_path(dataset_dir.parent.name, dataset_dir))
-    if background_size and _world_to_pixel_affine(dataset_dir.parent.name) is not None:
+    background_size = _image_dimensions(_background_path(dataset_dir.name, dataset_dir))
+    if background_size and _world_to_pixel_affine(dataset_dir.name) is not None:
         size = background_size
     counts = Counter(row.get("frame") for row in tracks)
     fps = _float(recording.get("frameRate"), 29.97) or 29.97
     frames = sorted((_int(frame) for frame in counts if _int(frame) is not None))
     return [
         {
-            "dataset_id": dataset_dir.parent.name,
+            "dataset_id": dataset_dir.name,
             "frame_id": frame,
             "timestamp": frame / fps,
             "width": size["width"],
@@ -508,6 +525,26 @@ def _oriented_box_pixel(cx, cy, width, length, heading_deg, transform):
     return [_world_to_pixel_point(x, y, transform) for x, y in world_points]
 
 
+def _heading_screen_angle(cx, cy, heading_deg, bounds=None, transform=None):
+    heading_value = _float(heading_deg)
+    if heading_value is None:
+        return None
+    heading = math.radians(heading_value)
+    wx = cx + math.sin(heading)
+    wy = cy + math.cos(heading)
+    if transform is not None:
+        start = _world_to_pixel_point(cx, cy, transform)
+        end = _world_to_pixel_point(wx, wy, transform)
+    else:
+        start = _view_point(cx, cy, bounds)
+        end = _view_point(wx, wy, bounds)
+    dx = end["x"] - start["x"]
+    dy = end["y"] - start["y"]
+    if math.hypot(dx, dy) < 1e-12:
+        return None
+    return math.atan2(dy, dx)
+
+
 def _lane_geometry(dataset_id: str, version: str, dataset_dir: Path):
     config_path = _find_road_config(dataset_id)
     if not config_path:
@@ -583,7 +620,9 @@ class VisualizerHandler(BaseHTTPRequestHandler):
     server_version = "OpenVTERVisualizer/1.0"
 
     def log_message(self, fmt, *args):  # noqa: D401 - keep BaseHTTPRequestHandler signature.
-        print("%s - - %s" % (self.client_address[0], fmt % args))
+        message = "%s - - %s" % (self.client_address[0], fmt % args)
+        print(message)
+        VISUALIZER_LOGGER.info(message)
 
     def _send_bytes(self, data: bytes, status=HTTPStatus.OK, content_type="application/octet-stream") -> None:
         self.send_response(status)
@@ -648,39 +687,53 @@ class VisualizerHandler(BaseHTTPRequestHandler):
 
     def _datasets(self):
         DEFAULT_INITIAL_ROOT.mkdir(parents=True, exist_ok=True)
-        DEFAULT_ADJUSTED_ROOT.mkdir(parents=True, exist_ok=True)
+        DEFAULT_FINAL_ROOT.mkdir(parents=True, exist_ok=True)
         converted = []
-        for dataset_dir in sorted(DEFAULT_ADJUSTED_ROOT.iterdir()):
+        for dataset_dir in sorted(DEFAULT_FINAL_ROOT.iterdir()):
             if not dataset_dir.is_dir():
                 continue
-            for version_dir in sorted(dataset_dir.iterdir()):
-                if not version_dir.is_dir():
-                    continue
-                if _is_standard_dataset(version_dir):
-                    metadata = _standard_metadata(dataset_dir.name, version_dir.name, version_dir)
-                    source_type = "standard"
-                elif _is_legacy_dataset(version_dir):
-                    metadata = _read_json(version_dir / "metadata.json")
-                    source_type = "legacy"
-                else:
-                    continue
+            missing_files = _missing_standard_files(dataset_dir)
+            if missing_files:
                 converted.append(
                     {
                         "dataset_id": dataset_dir.name,
-                        "version": version_dir.name,
-                        "display_name": metadata.get("display_name", f"{dataset_dir.name} / {version_dir.name}"),
-                        "row_count": metadata.get("row_count"),
-                        "object_count": metadata.get("object_count"),
-                        "full_object_count": metadata.get("full_object_count"),
-                        "filtered_object_count": metadata.get("filtered_object_count"),
-                        "total_frames": metadata.get("total_frames"),
-                        "fps": metadata.get("fps"),
-                        "class_names": metadata.get("class_names", []),
-                        "converted_time": metadata.get("converted_time"),
-                        "warning_count": len(metadata.get("warnings", [])),
-                        "source_type": source_type,
+                        "version": "final",
+                        "display_name": dataset_dir.name,
+                        "row_count": "",
+                        "object_count": 0,
+                        "full_object_count": 0,
+                        "filtered_object_count": 0,
+                        "total_frames": 0,
+                        "fps": None,
+                        "class_names": [],
+                        "converted_time": None,
+                        "warning_count": len(missing_files),
+                        "source_type": "missing_final_data",
+                        "is_available": False,
+                        "missing_files": missing_files,
                     }
                 )
+                continue
+            metadata = _standard_metadata(dataset_dir.name, "final", dataset_dir)
+            converted.append(
+                {
+                    "dataset_id": dataset_dir.name,
+                    "version": "final",
+                    "display_name": metadata.get("display_name", dataset_dir.name),
+                    "row_count": metadata.get("row_count"),
+                    "object_count": metadata.get("object_count"),
+                    "full_object_count": metadata.get("full_object_count"),
+                    "filtered_object_count": metadata.get("filtered_object_count"),
+                    "total_frames": metadata.get("total_frames"),
+                    "fps": metadata.get("fps"),
+                    "class_names": metadata.get("class_names", []),
+                    "converted_time": metadata.get("converted_time"),
+                    "warning_count": len(metadata.get("warnings", [])),
+                    "source_type": "final_data",
+                    "is_available": True,
+                    "missing_files": [],
+                }
+            )
 
         initial = []
         for source_dir in sorted(DEFAULT_INITIAL_ROOT.iterdir()):
@@ -689,16 +742,7 @@ class VisualizerHandler(BaseHTTPRequestHandler):
                     {
                         "dataset_id": source_dir.name,
                         "has_pkl": any(source_dir.glob("*.pkl")),
-                        "converted": (
-                            (
-                                _is_standard_dataset(DEFAULT_ADJUSTED_ROOT / source_dir.name / "full")
-                                or _is_legacy_dataset(DEFAULT_ADJUSTED_ROOT / source_dir.name / "full")
-                            )
-                            and (
-                                _is_standard_dataset(DEFAULT_ADJUSTED_ROOT / source_dir.name / "moving_filtered")
-                                or _is_legacy_dataset(DEFAULT_ADJUSTED_ROOT / source_dir.name / "moving_filtered")
-                            )
-                        ),
+                        "converted": _is_standard_dataset(DEFAULT_FINAL_ROOT / source_dir.name),
                     }
                 )
         return {"converted": converted, "initial": initial}
@@ -717,41 +761,35 @@ class VisualizerHandler(BaseHTTPRequestHandler):
             return
 
         is_standard = _is_standard_dataset(dataset_dir)
+        if not is_standard:
+            missing_files = _missing_standard_files(dataset_dir)
+            message = "Final Data is missing required CSV files: %s" % ", ".join(missing_files)
+            self._send_error(HTTPStatus.NOT_FOUND, message)
+            return
         if action == "metadata":
-            if is_standard:
-                self._send_json(_standard_metadata(dataset_id, version, dataset_dir))
-            else:
-                self._send_json(_read_json(dataset_dir / "metadata.json"))
+            self._send_json(_standard_metadata(dataset_id, version, dataset_dir))
             return
         if action == "tracks":
-            self._send_json(_standard_tracks(dataset_dir) if is_standard else _csv_records(dataset_dir / "tracks.csv"))
+            self._send_json(_standard_tracks(dataset_dir))
             return
         if action == "objects":
-            self._send_json(_standard_objects(dataset_dir) if is_standard else _csv_records(dataset_dir / "objects.csv"))
+            self._send_json(_standard_objects(dataset_dir))
             return
         if action == "frames":
-            self._send_json(_standard_frames(dataset_dir) if is_standard else _csv_records(dataset_dir / "frames.csv"))
+            self._send_json(_standard_frames(dataset_dir))
             return
         if action == "lanes":
             self._send_json(_lane_geometry(dataset_id, version, dataset_dir))
             return
         if action == "background":
-            if is_standard:
-                image_path = _background_path(dataset_id, dataset_dir)
-                if not image_path:
-                    self._send_error(
-                        HTTPStatus.NOT_FOUND,
-                        "Dataset has no background_*.jpg or first_frame_*.jpg in Initial results.",
-                    )
-                    return
-                self._serve_file(image_path)
+            image_path = _background_path(dataset_id, dataset_dir)
+            if not image_path:
+                self._send_error(
+                    HTTPStatus.NOT_FOUND,
+                    "Dataset has no background_*.jpg or first_frame_*.jpg in Initial results.",
+                )
                 return
-            metadata = _read_json(dataset_dir / "metadata.json")
-            image_name = metadata.get("background_image")
-            if not image_name:
-                self._send_error(HTTPStatus.NOT_FOUND, "Dataset has no background image.")
-                return
-            self._serve_file(dataset_dir / image_name)
+            self._serve_file(image_path)
             return
         self._send_error(HTTPStatus.NOT_FOUND, "Unknown dataset action.")
 
@@ -762,14 +800,17 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
+    logger = configure_visualizer_logger()
     server = ThreadingHTTPServer((args.host, args.port), VisualizerHandler)
     url = f"http://{args.host}:{args.port}"
     print(f"OpenVTER trajectory visualizer running at {url}")
     print("Press Ctrl+C to stop.")
+    logger.info("OpenVTER trajectory visualizer running at %s", url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping server.")
+        logger.info("Stopping server.")
     finally:
         server.server_close()
 

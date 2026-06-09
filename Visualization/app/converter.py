@@ -31,7 +31,8 @@ except Exception:  # pragma: no cover - fallback for lean environments.
 VIS_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INITIAL_ROOT = VIS_ROOT / "Initial results"
 DEFAULT_ADJUSTED_ROOT = VIS_ROOT / "Adjusted results"
-DEFAULT_LOG_PATH = VIS_ROOT / "logs" / "conversion.log"
+DEFAULT_FINAL_ROOT = VIS_ROOT / "Final Data"
+DEFAULT_LOG_PATH = VIS_ROOT / "logs" / "dataset_conversion.log"
 
 CATEGORY_ID_TO_CLASS = {
     0: "car",
@@ -67,8 +68,20 @@ VRU_CLASSES = {"pedestrian", "people", "bicycle", "tricycle", "awning-tricycle",
 SHORT_GAP_MAX = 5
 MEDIUM_GAP_MAX = 15
 MAX_MISSING_RATIO = 0.40
+
+# Motion post-processing is intentionally limited to center coordinates,
+# velocities, accelerations, and heading. It does not change filtering,
+# interpolation, ID mapping, class voting, or size aggregation rules.
+ENABLE_TRAJECTORY_SMOOTHING = True
+ENABLE_HEADING_REFINEMENT = True
+SMOOTH_WINDOW = 15
+VEHICLE_SMOOTH_WINDOW = 45
+SMOOTH_POLYORDER = 3
+SMOOTH_METHOD = "savgol"
 HEADING_SMOOTH_WINDOW = 5
 MIN_DISPLACEMENT_FOR_HEADING = 0.05
+LOW_SPEED_THRESHOLD = 0.2
+MAX_HEADING_JUMP_DEG = 45.0
 SHORT_TRACK_MIN_FRAMES = {
     "pedestrian": 90,
     "people": 90,
@@ -200,8 +213,59 @@ TRACKS_FIELDS = [
     "latVelocity",
     "lonAcceleration",
     "latAcceleration",
-    "centerX",
-    "centerY",
+]
+
+FINAL_DATA_SOURCE_VERSION = "moving_filtered"
+
+FINAL_RECORDING_META_COLUMNS = [
+    "recordingId",
+    "locationId",
+    "frameRate",
+    "numFrames",
+    "duration",
+    "numTracks",
+    "numVehicles",
+    "numVRUs",
+    "classTrackCounts",
+    "orthoPxToMeter",
+]
+
+FINAL_TRACKS_META_COLUMNS = [
+    "recordingId",
+    "trackId",
+    "initialFrame",
+    "finalFrame",
+    "numFrames",
+    "startXCenter",
+    "startYCenter",
+    "endXCenter",
+    "endYCenter",
+    "startLaneId",
+    "endLaneId",
+    "width",
+    "length",
+    "class",
+]
+
+FINAL_TRACKS_COLUMNS = [
+    "recordingId",
+    "trackId",
+    "lane_id",
+    "frame",
+    "trackLifetime",
+    "xCenter",
+    "yCenter",
+    "heading",
+    "width",
+    "length",
+    "xVelocity",
+    "yVelocity",
+    "xAcceleration",
+    "yAcceleration",
+    "lonVelocity",
+    "latVelocity",
+    "lonAcceleration",
+    "latAcceleration",
 ]
 
 ID_MAPPING_FIELDS = [
@@ -302,6 +366,110 @@ def _write_csv(path: Path, fieldnames: List[str], rows: Iterable[Dict[str, Any]]
         writer.writeheader()
         for row in rows:
             writer.writerow({field: _format_value(field, row.get(field, "")) for field in fieldnames})
+
+
+def _read_csv_rows(path: Path) -> Tuple[List[str], List[Dict[str, str]]]:
+    with path.open("r", newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        return list(reader.fieldnames or []), list(reader)
+
+
+def _parse_lane_id(value: Any) -> Optional[int]:
+    lane = _safe_float(value)
+    if lane is None:
+        return None
+    return int(lane)
+
+
+def fix_lane_id_minus_one_for_final_data(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    fixed_rows = [dict(row) for row in rows]
+    track_indices: Dict[str, List[int]] = defaultdict(list)
+    for index, row in enumerate(fixed_rows):
+        track_indices[str(row.get("trackId", ""))].append(index)
+
+    for indices in track_indices.values():
+        indices.sort(key=lambda index: (int(_safe_float(fixed_rows[index].get("frame")) or 0), index))
+        original_lanes = [_parse_lane_id(fixed_rows[index].get("lane_id")) for index in indices]
+        fixed_lanes = list(original_lanes)
+
+        for pos, row_index in enumerate(indices):
+            if original_lanes[pos] != -1:
+                continue
+
+            valid_lanes: List[int] = []
+            for lane in fixed_lanes[max(0, pos - 15) : pos]:
+                if lane is not None and lane != -1:
+                    valid_lanes.append(lane)
+            for lane in original_lanes[pos + 1 : pos + 16]:
+                if lane is not None and lane != -1:
+                    valid_lanes.append(lane)
+
+            if valid_lanes:
+                lane_id = Counter(valid_lanes).most_common(1)[0][0]
+                fixed_lanes[pos] = lane_id
+                fixed_rows[row_index]["lane_id"] = lane_id
+
+    return fixed_rows
+
+
+def _export_final_csv(source_path: Path, target_path: Path, columns: List[str], logger: logging.Logger) -> None:
+    source_fields, rows = _read_csv_rows(source_path)
+    missing_columns = [column for column in columns if column not in source_fields]
+    if missing_columns:
+        logger.warning(
+            "Final Data export %s is missing source columns %s from %s; blank values will be written.",
+            target_path.name,
+            missing_columns,
+            source_path,
+        )
+    _write_csv(target_path, columns, rows)
+
+
+def _export_final_tracks_csv(source_path: Path, target_path: Path, columns: List[str], logger: logging.Logger) -> None:
+    source_fields, rows = _read_csv_rows(source_path)
+    missing_columns = [column for column in columns if column not in source_fields]
+    if missing_columns:
+        logger.warning(
+            "Final Data export %s is missing source columns %s from %s; blank values will be written.",
+            target_path.name,
+            missing_columns,
+            source_path,
+        )
+    _write_csv(target_path, columns, fix_lane_id_minus_one_for_final_data(rows))
+
+
+def export_final_data(
+    final_root: Path,
+    folder_name: str,
+    version_outputs: Dict[str, Dict[str, str]],
+    logger: logging.Logger,
+    source_version: str = FINAL_DATA_SOURCE_VERSION,
+) -> Dict[str, str]:
+    """
+    Export the formal dataset CSVs by filtering already generated Adjusted results.
+    This intentionally does not alter conversion, filtering, interpolation, heading,
+    ID assignment, or visualization inputs.
+    """
+    source_outputs = version_outputs.get(source_version)
+    if not source_outputs:
+        raise ConversionError(f"Final Data export source version '{source_version}' is unavailable for {folder_name}.")
+
+    final_dir = Path(final_root) / folder_name
+    final_dir.mkdir(parents=True, exist_ok=True)
+    rec_path = final_dir / f"{folder_name}_recordingMeta.csv"
+    meta_path = final_dir / f"{folder_name}_tracksMeta.csv"
+    tracks_path = final_dir / f"{folder_name}_tracks.csv"
+
+    _export_final_csv(Path(source_outputs["recordingMeta"]), rec_path, FINAL_RECORDING_META_COLUMNS, logger)
+    _export_final_csv(Path(source_outputs["tracksMeta"]), meta_path, FINAL_TRACKS_META_COLUMNS, logger)
+    _export_final_tracks_csv(Path(source_outputs["tracks"]), tracks_path, FINAL_TRACKS_COLUMNS, logger)
+
+    return {
+        "sourceVersion": source_version,
+        "recordingMeta": str(rec_path),
+        "tracksMeta": str(meta_path),
+        "tracks": str(tracks_path),
+    }
 
 
 def _find_detection_pkl(dataset_dir: Path) -> Optional[Path]:
@@ -582,6 +750,45 @@ def _angle_diff_deg(a: Optional[float], b: Optional[float]) -> Optional[float]:
         return None
     diff = abs((a - b + 180.0) % 360.0 - 180.0)
     return diff
+
+
+def _normalize_heading_deg(value: float) -> float:
+    return float(value) % 360.0
+
+
+def _opposite_heading_deg(value: float) -> float:
+    return (float(value) + 180.0) % 360.0
+
+
+def _is_valid_heading(value: Any) -> bool:
+    return _finite(value)
+
+
+def _choose_heading_closest(candidates: Iterable[Optional[float]], reference: Optional[float]) -> Optional[float]:
+    valid = [_normalize_heading_deg(float(item)) for item in candidates if item is not None and _is_valid_heading(item)]
+    if not valid:
+        return None
+    if reference is None or not _is_valid_heading(reference):
+        return valid[0]
+    return min(valid, key=lambda item: _angle_diff_deg(item, float(reference)) or 0.0)
+
+
+def _align_axis_heading(axis_heading: Optional[float], reference: Optional[float]) -> Optional[float]:
+    if axis_heading is None or not _is_valid_heading(axis_heading):
+        return None
+    axis = _normalize_heading_deg(float(axis_heading))
+    return _choose_heading_closest((axis, _opposite_heading_deg(axis)), reference)
+
+
+def _nearest_stable_heading(index: int, stable_motion: List[Optional[float]]) -> Optional[float]:
+    for offset in range(1, len(stable_motion)):
+        prev = index - offset
+        nxt = index + offset
+        if prev >= 0 and stable_motion[prev] is not None:
+            return stable_motion[prev]
+        if nxt < len(stable_motion) and stable_motion[nxt] is not None:
+            return stable_motion[nxt]
+    return None
 
 
 def _dedupe_rows_for_stats(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -958,17 +1165,22 @@ def _fill_nan_centers(rows: List[Dict[str, Any]]) -> None:
             row[key] = value
 
 
-def _smooth_series(values: List[float], quality: Dict[str, Any], label: str) -> List[float]:
+def _smooth_series(values: List[float], quality: Dict[str, Any], label: str, window_override: Optional[int] = None) -> List[float]:
     n = len(values)
-    if n < 5 or savgol_filter is None:
+    if not ENABLE_TRAJECTORY_SMOOTHING:
+        return [float(v) for v in values]
+    if n < 5 or savgol_filter is None or SMOOTH_METHOD != "savgol":
         if n < 5:
             quality["short_tracks"].append(label)
         return [float(v) for v in values]
-    window = 15 if n >= 15 else (n if n % 2 == 1 else n - 1)
+    window = min(max(int(window_override or SMOOTH_WINDOW), 3), n)
+    if window % 2 == 0:
+        window -= 1
     if window < 5:
         return [float(v) for v in values]
     try:
-        return [float(v) for v in savgol_filter(np.asarray(values, dtype=float), window_length=window, polyorder=2, mode="interp")]
+        polyorder = min(max(int(SMOOTH_POLYORDER), 2), window - 2)
+        return [float(v) for v in savgol_filter(np.asarray(values, dtype=float), window_length=window, polyorder=polyorder, mode="interp")]
     except Exception:
         return [float(v) for v in values]
 
@@ -1030,30 +1242,112 @@ def _smooth_angles_degrees(values: List[float], window: int) -> List[float]:
     return out
 
 
-def _compute_heading(xs: List[float], ys: List[float], rows: List[Dict[str, Any]], frame_rate: float, logger: logging.Logger, label: str) -> List[float]:
+def _compute_motion_headings(xs: List[float], ys: List[float], frames: List[int], frame_rate: float) -> Tuple[List[Optional[float]], List[Optional[float]]]:
     n = len(xs)
     half_window = max(1, HEADING_SMOOTH_WINDOW // 2)
-    headings: List[Optional[float]] = []
-    last_valid: Optional[float] = None
+    motion: List[Optional[float]] = []
+    stable_motion: List[Optional[float]] = []
+    last_motion: Optional[float] = None
     for i in range(n):
         j0 = max(0, i - half_window)
         j1 = min(n - 1, i + half_window)
         dx = xs[j1] - xs[j0]
         dy = ys[j1] - ys[j0]
-        if math.hypot(dx, dy) >= MIN_DISPLACEMENT_FOR_HEADING:
-            last_valid = math.degrees(math.atan2(dx, dy)) % 360.0
-            headings.append(last_valid)
-        elif last_valid is not None:
-            headings.append(last_valid)
+        dt = max((frames[j1] - frames[j0]) / frame_rate, 1.0 / frame_rate)
+        displacement = math.hypot(dx, dy)
+        speed = displacement / dt
+        if displacement >= MIN_DISPLACEMENT_FOR_HEADING:
+            heading = math.degrees(math.atan2(dx, dy)) % 360.0
+            last_motion = heading
+            motion.append(heading)
+            stable_motion.append(heading if speed >= LOW_SPEED_THRESHOLD else None)
         else:
-            headings.append(None)
+            # Tiny displacements are too noisy to define a new direction, so keep
+            # the previous motion heading instead of creating a missing heading.
+            motion.append(last_motion)
+            stable_motion.append(None)
+    fallback_motion = next((heading for heading in motion if heading is not None), 0.0)
+    motion = [heading if heading is not None else fallback_motion for heading in motion]
+    return motion, stable_motion
 
-    fallback = next((_long_edge_heading(row) for row in rows if _long_edge_heading(row) is not None), None)
+
+def refine_heading_for_visualization(
+    track_rows: List[Dict[str, Any]],
+    motion_headings: List[Optional[float]],
+    stable_motion_headings: List[Optional[float]],
+    speeds: List[float],
+    logger: logging.Logger,
+    label: str,
+) -> List[float]:
+    """Move the visualizer's long-side/motion direction confirmation into conversion."""
+    if not track_rows:
+        return []
+
+    final: List[float] = []
+    last_heading: Optional[float] = None
+    last_stable: Optional[float] = None
+    fallback = next((heading for heading in motion_headings if heading is not None), None)
     if fallback is None:
         fallback = 0.0
         logger.warning("%s has no valid motion or bbox heading; heading fallback is 0.0.", label)
-    filled = [float(h if h is not None else fallback) for h in headings]
-    return _smooth_angles_degrees(filled, HEADING_SMOOTH_WINDOW)
+
+    for i, row in enumerate(track_rows):
+        motion = motion_headings[i]
+        stable_motion = stable_motion_headings[i]
+        speed = float(speeds[i]) if i < len(speeds) else 0.0
+        is_low_speed = speed < LOW_SPEED_THRESHOLD or motion is None
+
+        # For horizontal/unoriented boxes, the box long edge is not a reliable
+        # direction signal. Heading follows the smoothed trajectory direction,
+        # while low-speed frames keep the latest stable heading.
+        candidate = motion
+
+        if is_low_speed and last_stable is not None:
+            candidate = last_stable
+        elif candidate is None:
+            candidate = last_heading or _nearest_stable_heading(i, stable_motion_headings) or fallback
+
+        candidate = _normalize_heading_deg(float(candidate))
+        if last_heading is not None:
+            jump = _angle_diff_deg(candidate, last_heading) or 0.0
+            if jump > MAX_HEADING_JUMP_DEG:
+                supported_by_motion = stable_motion is not None and (_angle_diff_deg(candidate, stable_motion) or 0.0) <= MAX_HEADING_JUMP_DEG
+                if is_low_speed or not supported_by_motion:
+                    candidate = last_heading
+
+        final.append(candidate)
+        last_heading = candidate
+        if not is_low_speed and stable_motion is not None:
+            last_stable = candidate
+
+    return _smooth_angles_degrees(final, HEADING_SMOOTH_WINDOW if ENABLE_HEADING_REFINEMENT else 1)
+
+
+def smooth_track_and_refine_motion(
+    track_rows: List[Dict[str, Any]],
+    final_class: str,
+    frame_rate: float,
+    logger: logging.Logger,
+    quality: Dict[str, Any],
+    label: str,
+) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float]]:
+    """
+    Smooth one track's center coordinates, recompute velocity/acceleration, and
+    stabilize heading for direct visualization. Only motion fields are changed.
+    """
+    rows = sorted(track_rows, key=lambda row: int(row["frame"]))
+    smooth_window = VEHICLE_SMOOTH_WINDOW if final_class in VEHICLE_CLASSES else SMOOTH_WINDOW
+    xs = _smooth_series([float(row["xCenter_raw"]) for row in rows], quality, label, smooth_window)
+    ys = _smooth_series([float(row["yCenter_raw"]) for row in rows], quality, label, smooth_window)
+    frames = [int(row["frame"]) for row in rows]
+    x_vel = _differentiate(xs, frames, frame_rate)
+    y_vel = _differentiate(ys, frames, frame_rate)
+    x_acc = _differentiate(x_vel, frames, frame_rate)
+    y_acc = _differentiate(y_vel, frames, frame_rate)
+    motion_headings, stable_motion_headings = _compute_motion_headings(xs, ys, frames, frame_rate)
+    speeds = [math.hypot(vx, vy) for vx, vy in zip(x_vel, y_vel)]
+    headings = refine_heading_for_visualization(rows, motion_headings, stable_motion_headings, speeds, logger, label)
+    return xs, ys, headings, x_vel, y_vel, x_acc, y_acc
 
 
 def _min_track_frames(final_class: str) -> int:
@@ -1094,40 +1388,36 @@ def _estimate_ortho_px_to_meter(rows: List[Dict[str, Any]], logger: logging.Logg
 def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float, logger: logging.Logger, quality: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     prepared = []
     for idx, fragment in enumerate(fragments, start=1):
-        fragment = [dict(row) for row in sorted(fragment, key=lambda item: int(item["frame"]))]
+        fragment.sort(key=lambda item: int(item["frame"]))
         label = f"fragment={idx},object_id={fragment[0]['object_id']}"
         final_class, ratio, unstable, class_counts = _mode_class(fragment, logger, label, quality)
         _mark_isolated_outliers(fragment, final_class, frame_rate, quality)
         _fill_nan_centers(fragment)
 
-        with_gaps: List[Dict[str, Any]] = []
-        interpolated_in_track = 0
-        for prev, cur in zip(fragment[:-1], fragment[1:]):
-            with_gaps.append(prev)
-            inserts = _interpolate_between(prev, cur, final_class, frame_rate)
-            interpolated_in_track += len(inserts)
-            with_gaps.extend(inserts)
-        with_gaps.append(fragment[-1])
-        with_gaps = sorted(with_gaps, key=lambda item: int(item["frame"]))
+        initial_frame = int(fragment[0]["frame"])
+        final_frame = int(fragment[-1]["frame"])
+        expected_frames = final_frame - initial_frame + 1
+        interpolated_in_track = max(expected_frames - len(fragment), 0)
         min_frames = _min_track_frames(final_class)
-        if len(with_gaps) < min_frames:
+        if expected_frames < min_frames:
             quality["short_duration_dropped_track_count"] += 1
             quality["short_duration_dropped_tracks"].append(
                 {
                     "object_id": int(fragment[0]["object_id"]),
                     "class": final_class,
-                    "numFrames": len(with_gaps),
+                    "numFrames": expected_frames,
                     "min_required_frames": min_frames,
-                    "initialFrame": int(with_gaps[0]["frame"]),
-                    "finalFrame": int(with_gaps[-1]["frame"]),
+                    "initialFrame": initial_frame,
+                    "finalFrame": final_frame,
                     "drop_reason": "track_duration_too_short",
                 }
             )
+            fragment.clear()
             continue
         quality["interpolated_frame_count"] += interpolated_in_track
+        valid_w, valid_l = _valid_dimensions(fragment, quality)
         prepared.append(
             {
-                "rows": with_gaps,
                 "raw_rows": fragment,
                 "final_class": final_class,
                 "final_class_ratio": ratio,
@@ -1135,22 +1425,24 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
                 "class_counts": class_counts,
                 "original_object_id": int(fragment[0]["object_id"]),
                 "missing_stats": _track_missing_stats(int(fragment[0]["object_id"]), fragment),
+                "initial_frame": initial_frame,
+                "valid_w": valid_w,
+                "valid_l": valid_l,
             }
         )
+    fragments.clear()
 
     # Conservative stitching is intentionally disabled unless a single unambiguous candidate is found.
     # Current implementation records zero merges rather than making aggressive ID merges.
     quality["stitched_track_count"] = 0
-    prepared.sort(key=lambda item: (item["rows"][0]["frame"], item["original_object_id"]))
+    prepared.sort(key=lambda item: (item["initial_frame"], item["original_object_id"]))
 
     class_dim_values: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: {"widths": [], "lengths": []})
-    track_payloads = []
     for item in prepared:
-        valid_w, valid_l = _valid_dimensions(item["raw_rows"], quality)
+        valid_w, valid_l = item["valid_w"], item["valid_l"]
         if valid_w and valid_l:
             class_dim_values[item["final_class"]]["widths"].extend(valid_w)
             class_dim_values[item["final_class"]]["lengths"].extend(valid_l)
-        track_payloads.append((item, valid_w, valid_l))
 
     class_dim_mean = {}
     for cls, vals in class_dim_values.items():
@@ -1159,15 +1451,23 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
 
     tracks_meta: List[Dict[str, Any]] = []
     tracks_rows: List[Dict[str, Any]] = []
-    for track_id, (item, valid_w, valid_l) in enumerate(track_payloads, start=1):
-        rows = item["rows"]
+    for track_id, item in enumerate(prepared, start=1):
+        raw_rows = item["raw_rows"]
+        rows: List[Dict[str, Any]] = []
+        for prev, cur in zip(raw_rows[:-1], raw_rows[1:]):
+            rows.append(prev)
+            rows.extend(_interpolate_between(prev, cur, item["final_class"], frame_rate))
+        rows.append(raw_rows[-1])
+        rows = sorted(rows, key=lambda row: int(row["frame"]))
+
         final_class = item["final_class"]
+        valid_w, valid_l = item["valid_w"], item["valid_l"]
         if valid_w and valid_l:
             mean_width = float(np.mean(valid_w))
             mean_length = float(np.mean(valid_l))
         else:
-            med_w = [row["raw_width"] for row in item["raw_rows"] if _finite(row.get("raw_width"))]
-            med_l = [row["raw_length"] for row in item["raw_rows"] if _finite(row.get("raw_length"))]
+            med_w = [row["raw_width"] for row in raw_rows if _finite(row.get("raw_width"))]
+            med_l = [row["raw_length"] for row in raw_rows if _finite(row.get("raw_length"))]
             if med_w and med_l:
                 mean_width = float(np.median(med_w))
                 mean_length = float(np.median(med_l))
@@ -1190,14 +1490,15 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
         box_orientation_source = "heading_corrected_from_hbb"
         missing_ratio = float(item["missing_stats"]["missing_ratio"])
 
-        xs = _smooth_series([float(row["xCenter_raw"]) for row in rows], quality, f"trackId={track_id}")
-        ys = _smooth_series([float(row["yCenter_raw"]) for row in rows], quality, f"trackId={track_id}")
         frames = [int(row["frame"]) for row in rows]
-        headings = _compute_heading(xs, ys, rows, frame_rate, logger, f"trackId={track_id}")
-        x_vel = _differentiate(xs, frames, frame_rate)
-        y_vel = _differentiate(ys, frames, frame_rate)
-        x_acc = _differentiate(x_vel, frames, frame_rate)
-        y_acc = _differentiate(y_vel, frames, frame_rate)
+        xs, ys, headings, x_vel, y_vel, x_acc, y_acc = smooth_track_and_refine_motion(
+            rows,
+            final_class,
+            frame_rate,
+            logger,
+            quality,
+            f"trackId={track_id}",
+        )
 
         for lifetime, (row, x, y, heading, vx, vy, ax, ay) in enumerate(zip(rows, xs, ys, headings, x_vel, y_vel, x_acc, y_acc), start=1):
             theta = math.radians(heading)
@@ -1264,6 +1565,10 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
                 "_category_unstable": item["category_unstable"],
             }
         )
+        raw_rows.clear()
+        item["raw_rows"] = []
+        item["valid_w"] = []
+        item["valid_l"] = []
 
     return tracks_meta, tracks_rows
 
@@ -1304,8 +1609,16 @@ def _quality_template() -> Dict[str, Any]:
         "short_duration_dropped_track_count": 0,
         "short_duration_dropped_tracks": [],
         "heading_parameters": {
+            "enable_trajectory_smoothing": ENABLE_TRAJECTORY_SMOOTHING,
+            "enable_heading_refinement": ENABLE_HEADING_REFINEMENT,
+            "smooth_window": SMOOTH_WINDOW,
+            "vehicle_smooth_window": VEHICLE_SMOOTH_WINDOW,
+            "smooth_polyorder": SMOOTH_POLYORDER,
+            "smooth_method": SMOOTH_METHOD,
             "heading_smooth_window": HEADING_SMOOTH_WINDOW,
             "min_displacement_for_heading": MIN_DISPLACEMENT_FOR_HEADING,
+            "low_speed_threshold": LOW_SPEED_THRESHOLD,
+            "max_heading_jump_deg": MAX_HEADING_JUMP_DEG,
         },
         "outlier_frame_count": 0,
         "split_track_count": 0,
@@ -1688,6 +2001,7 @@ def convert_dataset(
     initial_root: Path = DEFAULT_INITIAL_ROOT,
     force: bool = False,
     logger: Optional[logging.Logger] = None,
+    final_root: Path = DEFAULT_FINAL_ROOT,
 ) -> Dict[str, Any]:
     logger = logger or configure_logger()
     dataset_dir = Path(dataset_dir).resolve()
@@ -1950,6 +2264,7 @@ def convert_dataset(
             dataset_log_lines,
         ),
     }
+    final_outputs = export_final_data(final_root, folder_name, version_outputs, logger)
 
     return {
         "dataset_id": folder_name,
@@ -1957,6 +2272,7 @@ def convert_dataset(
         "recordingId": recording_id,
         "locationId": location_id,
         "numTracks": full_summary["numTracks"],
+        "finalData": final_outputs,
         "versions": {
             "full": {
                 "numTracks": full_summary["numTracks"],
@@ -1986,21 +2302,29 @@ def convert_all(
     force: bool = False,
     datasets: Optional[List[str]] = None,
     logger: Optional[logging.Logger] = None,
+    final_root: Path = DEFAULT_FINAL_ROOT,
 ) -> Dict[str, Any]:
     logger = logger or configure_logger()
     source_root.mkdir(parents=True, exist_ok=True)
     output_root.mkdir(parents=True, exist_ok=True)
+    final_root.mkdir(parents=True, exist_ok=True)
     selected = set(datasets or [])
     results = []
     for dataset_dir in find_dataset_dirs(source_root):
         if selected and dataset_dir.name not in selected:
             continue
         try:
-            results.append(convert_dataset(dataset_dir, output_root, source_root, force, logger))
+            results.append(convert_dataset(dataset_dir, output_root, source_root, force, logger, final_root))
         except Exception as exc:
             logger.exception("Failed to convert %s", dataset_dir.name)
             results.append({"dataset_id": dataset_dir.name, "status": "failed", "error": str(exc)})
-    return {"source_root": str(source_root), "output_root": str(output_root), "force": force, "results": results}
+    return {
+        "source_root": str(source_root),
+        "output_root": str(output_root),
+        "final_output_root": str(final_root),
+        "force": force,
+        "results": results,
+    }
 
 
 def inspect_pkl_structure(pkl_path: Path) -> Dict[str, Any]:
@@ -2028,6 +2352,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Convert OpenVTER pkl result folders to standardized trajectory CSV files.")
     parser.add_argument("--source-root", default=str(DEFAULT_INITIAL_ROOT), help="Folder containing raw result subfolders.")
     parser.add_argument("--output-root", default=str(DEFAULT_ADJUSTED_ROOT), help="Folder for standardized CSV datasets.")
+    parser.add_argument("--final-output-root", default=str(DEFAULT_FINAL_ROOT), help="Folder for formal final dataset CSVs.")
     parser.add_argument("--force", action="store_true", help="Re-run conversion.")
     parser.add_argument("--datasets", nargs="*", default=None, help="Only convert these dataset folder names.")
     parser.add_argument("--inspect", default=None, help="Only inspect a detection pkl and print structure JSON.")
@@ -2037,7 +2362,14 @@ def main() -> None:
     if args.inspect:
         print(json.dumps(inspect_pkl_structure(Path(args.inspect)), ensure_ascii=False, indent=2))
         return
-    result = convert_all(Path(args.source_root), Path(args.output_root), args.force, args.datasets, logger)
+    result = convert_all(
+        Path(args.source_root),
+        Path(args.output_root),
+        args.force,
+        args.datasets,
+        logger,
+        Path(args.final_output_root),
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

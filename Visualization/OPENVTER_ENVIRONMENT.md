@@ -68,7 +68,17 @@ python "Visualization\app\converter.py" --force
 只转换某个数据集：
 
 ```powershell
-python "Visualization\app\converter.py" --datasets cao_qiao_001 --force
+1 python "Visualization\app\converter.py" --datasets cao_qiao_001 --force
+python "Visualization\app\converter.py" --datasets qian_qi_neng_yuan_020 --force
+2 python "Visualization\app\converter.py" --datasets cao_qiao_001 --force > "logs\cao_qiao_001.log" 2>&1
+
+2 python "Visualization\app\converter.py" --datasets qian_qi_neng_yuan_020 --force > "logs\qian_qi_neng_yuan_020.log" 2>&1
+
+3 python "Visualization\app\converter.py" --datasets yin_hai_1_016 --force > "logs\yin_hai_1_016.log" 2>&1
+
+4 python "Visualization\app\converter.py" --datasets ban_xian_shan_008 --force > "logs\ban_xian_shan_008.log" 2>&1
+
+
 ```
 
 检查 pkl 结构：

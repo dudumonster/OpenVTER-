@@ -1,2 +1,0 @@
-recordingId,locationId,frameRate,numFrames,duration,numTracks,numVehicles,numVRUs,classTrackCounts,orthoPxToMeter
-001,cao_qiao,29.9700,9022,301.034,444,329,259,"{""car"":152,""truck"":8,""bus"":2,""freight_car"":2,""van"":21,""pedestrian"":103,""people"":12,""bicycle"":0,""tricycle"":14,""awning-tricycle"":1,""motor"":129}",0.044444

@@ -35,6 +35,7 @@ const ROAD_MASK_COLOR = "rgba(0, 0, 0, 0.88)";
 const DEFAULT_TRAIL_LENGTH = 50;
 const STATIC_ARROW_SUPPRESSED_CLASSES = new Set(["car", "truck", "bus", "freight_car", "van", "motor", "tricycle", "awning-tricycle"]);
 const HEADING_CONFIG = {
+  use_legacy_visual_heading_refinement: false,
   heading_smooth_window: 8,
   min_motion_threshold: 2.0,
   arrow_length_scale: 1.0,
@@ -134,10 +135,14 @@ async function loadDatasets() {
   const payload = await api("/api/datasets");
   state.datasets = payload.converted || [];
   renderDatasets();
-  if (!state.datasetId && state.datasets.length) {
-    await loadDataset(state.datasets[0].dataset_id, state.datasets[0].version);
+  const firstAvailable = state.datasets.find((item) => item.is_available !== false);
+  if (!state.datasetId && firstAvailable) {
+    await loadDataset(firstAvailable.dataset_id, firstAvailable.version);
   } else if (!state.datasets.length) {
     els.datasetSummary.textContent = "没有已转换数据集";
+    els.emptyState.classList.remove("hidden");
+  } else if (!firstAvailable) {
+    els.datasetSummary.textContent = "Final Data 缺少必要 CSV";
     els.emptyState.classList.remove("hidden");
   }
 }
@@ -153,7 +158,7 @@ function renderDatasets() {
   if (!items.length) {
     const div = document.createElement("div");
     div.className = "dataset-meta";
-    div.textContent = state.datasets.length ? "没有匹配的数据集" : "Adjusted results 为空";
+    div.textContent = state.datasets.length ? "没有匹配的数据集" : "Final Data 为空";
     els.datasetList.appendChild(div);
     return;
   }
@@ -162,13 +167,16 @@ function renderDatasets() {
     const btn = document.createElement("button");
     const active = item.dataset_id === state.datasetId && item.version === state.version;
     btn.className = `dataset-item ${active ? "active" : ""}`;
+    btn.disabled = item.is_available === false;
     btn.innerHTML = `
       <div class="dataset-name">${escapeHtml(item.dataset_id)}</div>
       <div class="dataset-version">${escapeHtml(item.version)}</div>
       <div class="dataset-meta">${item.total_frames || 0} 帧 · ${item.object_count || 0} 目标 · ${item.row_count || 0} 行</div>
-      ${item.version === "moving_filtered" ? `<div class="dataset-meta">过滤 ${item.filtered_object_count || 0} 个静止目标</div>` : ""}
+      ${item.is_available === false ? `<div class="dataset-meta">缺少 ${escapeHtml((item.missing_files || []).join(", "))}</div>` : ""}
     `;
-    btn.addEventListener("click", () => loadDataset(item.dataset_id, item.version));
+    btn.addEventListener("click", () => {
+      if (item.is_available !== false) loadDataset(item.dataset_id, item.version);
+    });
     els.datasetList.appendChild(btn);
   }
 }
@@ -217,7 +225,7 @@ async function loadDataset(datasetId, version) {
   els.timeline.max = String(state.maxFrame);
   els.timeline.value = String(state.currentFrame);
   els.emptyState.classList.add("hidden");
-  els.datasetSummary.textContent = `${datasetId} / ${version} · ${state.frameIds.length} 帧 · ${state.objects.length} 目标`;
+  els.datasetSummary.textContent = `${datasetId} · ${state.frameIds.length} 帧 · ${state.objects.length} 目标`;
   setStatus("");
   resizeCanvas();
   draw();
@@ -248,6 +256,7 @@ function normalizeTrack(row) {
     missing_ratio: asNumber(row.missing_ratio),
     is_interpolated: row.is_interpolated === true || row.is_interpolated === "true",
     angle_deg: asNumber(row.angle_deg),
+    heading_screen_rad: asNumber(row.heading_screen_rad),
     category_id: asNumber(row.category_id),
     lane_id: asNumber(row.lane_id),
   };
@@ -431,6 +440,39 @@ function screenToWorld(x, y) {
   return { x: (x - box.offsetX) / box.scaleX, y: (y - box.offsetY) / box.scaleY };
 }
 
+function playbackFraction() {
+  return state.playing ? Math.max(0, Math.min(1, state.frameAccumulator || 0)) : 0;
+}
+
+function interpolateNumber(a, b, t) {
+  if (a === null || b === null) return a;
+  return a + (b - a) * t;
+}
+
+function interpolateAngleRad(a, b, t) {
+  if (a === null || b === null) return a;
+  const diff = Math.atan2(Math.sin(b - a), Math.cos(b - a));
+  return a + diff * t;
+}
+
+function interpolateDisplayRow(row, t) {
+  if (t <= 0) return row;
+  const rows = state.objectMap.get(row.object_id) || [];
+  const next = rows.find((item) => item.frame_id === row.frame_id + 1);
+  if (!next) return row;
+  const out = { ...row, _interpolated_display: true };
+  ["x1", "y1", "x2", "y2", "cx", "cy", "width", "height"].forEach((key) => {
+    out[key] = interpolateNumber(row[key], next[key], t);
+  });
+  for (let i = 1; i <= 4; i += 1) {
+    out[`q${i}_x`] = interpolateNumber(row[`q${i}_x`], next[`q${i}_x`], t);
+    out[`q${i}_y`] = interpolateNumber(row[`q${i}_y`], next[`q${i}_y`], t);
+  }
+  out.heading_screen_rad = interpolateAngleRad(row.heading_screen_rad, next.heading_screen_rad, t);
+  out.angle_deg = interpolateNumber(row.angle_deg, next.angle_deg, t);
+  return out;
+}
+
 function visibleCurrentRows() {
   let rows = state.frameMap.get(state.currentFrame) || [];
   rows = rows.filter((row) => state.selectedClasses.has(row.class_name || "unknown"));
@@ -438,7 +480,8 @@ function visibleCurrentRows() {
     const wanted = Number(state.objectFilter);
     if (Number.isFinite(wanted)) rows = rows.filter((row) => row.object_id === wanted);
   }
-  return rows;
+  const t = playbackFraction();
+  return t > 0 ? rows.map((row) => interpolateDisplayRow(row, t)) : rows;
 }
 
 function draw() {
@@ -469,20 +512,28 @@ function draw() {
 function drawTrails(currentRows) {
   for (const row of currentRows) {
     const history = trajectoryFor(row.object_id, state.currentFrame, state.trailLength);
+    if (row._interpolated_display) history.push(row);
     if (history.length < 2) continue;
     const style = styleFor(row.class_name);
-    for (let i = 1; i < history.length; i += 1) {
-      const a = history[i - 1];
-      const b = history[i];
-      const p1 = worldToScreen(a.cx, a.cy);
-      const p2 = worldToScreen(b.cx, b.cy);
-      ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
-      ctx.strokeStyle = hexToRgba(style.color, Math.max(0.1, (i / history.length) * 0.75));
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
+    drawSmoothTrail(history, style.color);
+  }
+}
+
+function drawSmoothTrail(history, color) {
+  const points = history.map((item) => worldToScreen(item.cx, item.cy));
+  for (let i = 1; i < points.length; i += 1) {
+    const prev = points[i - 1];
+    const current = points[i];
+    const next = points[i + 1];
+    const start = i === 1 ? prev : { x: (prev.x + current.x) / 2, y: (prev.y + current.y) / 2 };
+    const end = next ? { x: (current.x + next.x) / 2, y: (current.y + next.y) / 2 } : current;
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    if (next) ctx.quadraticCurveTo(current.x, current.y, end.x, end.y);
+    else ctx.lineTo(end.x, end.y);
+    ctx.strokeStyle = hexToRgba(color, Math.max(0.1, (i / points.length) * 0.75));
+    ctx.lineWidth = 2;
+    ctx.stroke();
   }
 }
 
@@ -587,18 +638,29 @@ function headingFor(row) {
   return state.headingCache.get(row.object_id) || null;
 }
 
-function drawDirection(row, color) {
+function headingFromCsv(row) {
+  if (row.heading_screen_rad !== null) return row.heading_screen_rad;
+  if (row.angle_deg !== null) return (row.angle_deg * Math.PI) / 180 - Math.PI / 2;
+  return null;
+}
+
+function legacyVisualHeadingFor(row) {
   const longSide = boxLongSideInfo(row);
   const motionRad = headingFor(row);
   let rad = longSide ? longSide.angle : motionRad;
-  if (rad === null) return;
+  if (rad === null) return null;
 
   if (longSide && motionRad !== null) {
     const dot = Math.cos(rad) * Math.cos(motionRad) + Math.sin(rad) * Math.sin(motionRad);
     if (dot < 0) rad += Math.PI;
   }
+  return rad;
+}
 
+function drawDirection(row, color) {
+  const rad = headingFromCsv(row) ?? (HEADING_CONFIG.use_legacy_visual_heading_refinement ? legacyVisualHeadingFor(row) : null);
   if (rad === null) return;
+  const longSide = boxLongSideInfo(row);
   const center = worldToScreen(row.cx, row.cy);
   const baseLen = (longSide ? longSide.length : targetLongSideScreenLength(row)) * HEADING_CONFIG.arrow_length_scale;
   const len = Math.max(HEADING_CONFIG.arrow_min_length, Math.min(HEADING_CONFIG.arrow_max_length, baseLen));
@@ -793,8 +855,8 @@ function tick(ts) {
       state.frameAccumulator -= steps;
       state.currentFrame += steps;
       if (state.currentFrame > state.maxFrame) state.currentFrame = state.minFrame;
-      draw();
     }
+    draw();
   }
   requestAnimationFrame(tick);
 }
@@ -835,6 +897,12 @@ function applyInputs() {
     }
     state.objectFilter = String(objectId);
     state.selectedObject = objectId;
+    if (!frameText) {
+      const rows = state.objectMap.get(objectId) || [];
+      if (rows.length) state.currentFrame = clampFrame(rows[0].frame_id);
+      state.lastTick = 0;
+      state.frameAccumulator = 0;
+    }
   }
 
   if (frameText) {
@@ -850,7 +918,7 @@ function applyInputs() {
   }
 
   if (objectText && frameText) setStatus(`显示 object_id ${state.objectFilter}，跳转到第 ${state.currentFrame} 帧`);
-  else if (objectText) setStatus(`显示 object_id ${state.objectFilter}`);
+  else if (objectText) setStatus(`显示 object_id ${state.objectFilter}，跳转到首次出现帧 ${state.currentFrame}`);
   else if (frameText) setStatus(`跳转到第 ${state.currentFrame} 帧`);
   draw();
 }

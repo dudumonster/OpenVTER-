@@ -169,6 +169,12 @@ checkpoints/
 tools/*/output/
 trajectories.csv
 trajectories.xlsx
+*.csv
+*.tsv
+*.pkl
+*.pickle
+*.xlsx
+*.xls
 *.tmp
 *.temp
 *.bak
@@ -181,6 +187,9 @@ tph-yolov5/.vscode/
 tph-yolov5/weights/
 
 # Generated visualization artifacts and intermediate data
-Visualization/Adjusted results/
-Visualization/Initial results/
-Visualization/Final Data/
+Visualization/Adjusted results/*
+!Visualization/Adjusted results/.gitkeep
+Visualization/Initial results/*
+!Visualization/Initial results/.gitkeep
+Visualization/Final Data/*
+!Visualization/Final Data/.gitkeep

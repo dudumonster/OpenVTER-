@@ -179,3 +179,8 @@ tools/wheels-cu113/
 tph-yolov5/runs/
 tph-yolov5/.vscode/
 tph-yolov5/weights/
+
+# Generated visualization artifacts and intermediate data
+Visualization/Adjusted results/
+Visualization/Initial results/
+Visualization/Final Data/

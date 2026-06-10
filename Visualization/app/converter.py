@@ -81,6 +81,54 @@ VEHICLE_SMOOTH_WINDOW = 45
 SMOOTH_POLYORDER = 3
 SMOOTH_METHOD = "savgol"
 HEADING_SMOOTH_WINDOW = 5
+ENABLE_DIRECT_MOTION_FIELD_SMOOTHING = True
+MOTION_SMOOTH_METHOD = "savgol"
+VELOCITY_SMOOTH_WINDOW_BY_CLASS = {
+    "car": 91,
+    "van": 91,
+    "truck": 91,
+    "bus": 91,
+    "freight_car": 91,
+    "motor": 61,
+    "tricycle": 61,
+    "awning-tricycle": 61,
+    "bicycle": 61,
+    "pedestrian": 31,
+    "people": 31,
+    "default": 61,
+}
+ACCELERATION_SMOOTH_WINDOW_BY_CLASS = {
+    "car": 121,
+    "van": 121,
+    "truck": 121,
+    "bus": 121,
+    "freight_car": 121,
+    "motor": 75,
+    "tricycle": 75,
+    "awning-tricycle": 75,
+    "bicycle": 75,
+    "pedestrian": 45,
+    "people": 45,
+    "default": 75,
+}
+HEADING_DIRECT_SMOOTH_WINDOW_BY_CLASS = {
+    "car": 75,
+    "van": 75,
+    "truck": 75,
+    "bus": 75,
+    "freight_car": 75,
+    "motor": 45,
+    "tricycle": 45,
+    "awning-tricycle": 45,
+    "bicycle": 45,
+    "pedestrian": 21,
+    "people": 21,
+    "default": 45,
+}
+MOTION_SMOOTH_POLYORDER = 3
+ACCELERATION_EXTRA_SMOOTH_PASSES = 2
+VELOCITY_EXTRA_SMOOTH_PASSES = 1
+HEADING_EXTRA_SMOOTH_PASSES = 1
 MIN_DISPLACEMENT_FOR_HEADING = 0.05
 LOW_SPEED_THRESHOLD = 0.2
 MAX_HEADING_JUMP_DEG = 45.0
@@ -1266,6 +1314,197 @@ def _smooth_series(values: List[float], quality: Dict[str, Any], label: str, win
         return [float(v) for v in values]
 
 
+def _motion_window_for_class(config: Dict[str, int], final_class: str) -> int:
+    return int(config.get(final_class, config["default"]))
+
+
+def _adapt_direct_smooth_window(length: int, requested_window: int, polyorder: int) -> Optional[int]:
+    if length <= 0:
+        return None
+    min_window = max(int(polyorder) + 3, 3)
+    if min_window % 2 == 0:
+        min_window += 1
+    if length < min_window:
+        return None
+    window = min(max(int(requested_window), min_window), length)
+    if window % 2 == 0:
+        window -= 1
+    if window < min_window:
+        return None
+    return window
+
+
+def _fill_nan_numeric(values: List[float]) -> Tuple[np.ndarray, int]:
+    arr = np.asarray(values, dtype=float)
+    finite_mask = np.isfinite(arr)
+    valid_count = int(np.count_nonzero(finite_mask))
+    if valid_count == 0:
+        return arr, valid_count
+    if valid_count < len(arr):
+        idx = np.arange(len(arr), dtype=float)
+        arr = arr.copy()
+        arr[~finite_mask] = np.interp(idx[~finite_mask], idx[finite_mask], arr[finite_mask])
+    return arr, valid_count
+
+
+def _centered_rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
+    n = len(values)
+    if n == 0 or window <= 1:
+        return values.astype(float, copy=True)
+    half = window // 2
+    out = np.empty(n, dtype=float)
+    for i in range(n):
+        start = max(0, i - half)
+        end = min(n, i + half + 1)
+        out[i] = float(np.mean(values[start:end]))
+    return out
+
+
+def smooth_numeric_series(values: List[float], window: int, polyorder: int, passes: int = 1) -> List[float]:
+    """
+    Smooth a frame-aligned numeric series without changing its length.
+    Sparse NaNs are linearly interpolated before smoothing; all-NaN or too-short
+    inputs are returned as-is.
+    """
+    n = len(values)
+    if n == 0:
+        return []
+    original = [float(v) for v in values]
+    arr, valid_count = _fill_nan_numeric(original)
+    if valid_count < 2:
+        return original
+    actual_window = _adapt_direct_smooth_window(n, window, polyorder)
+    if actual_window is None:
+        return original
+
+    out = arr.astype(float, copy=True)
+    repeat = max(1, int(passes))
+    for _ in range(repeat):
+        if savgol_filter is not None and MOTION_SMOOTH_METHOD == "savgol":
+            try:
+                actual_polyorder = min(max(int(polyorder), 1), actual_window - 3)
+                out = savgol_filter(out, window_length=actual_window, polyorder=actual_polyorder, mode="interp")
+                continue
+            except Exception:
+                pass
+        out = _centered_rolling_mean(out, actual_window)
+    return [float(v) for v in out]
+
+
+def smooth_angle_degrees(values: List[float], window: int, polyorder: int, passes: int = 1) -> List[float]:
+    """
+    Smooth heading as an angle on the unit circle. The existing heading
+    convention is preserved: 0 deg points to +Y and 90 deg points to +X.
+    """
+    if not values:
+        return []
+    radians = np.radians(np.asarray(values, dtype=float))
+    sin_values = np.sin(radians)
+    cos_values = np.cos(radians)
+    smooth_sin = smooth_numeric_series([float(v) for v in sin_values], window, polyorder, passes)
+    smooth_cos = smooth_numeric_series([float(v) for v in cos_values], window, polyorder, passes)
+    out: List[float] = []
+    for sin_v, cos_v, original in zip(smooth_sin, smooth_cos, values):
+        if not (_finite(sin_v) and _finite(cos_v)) or (abs(sin_v) < 1e-12 and abs(cos_v) < 1e-12):
+            out.append(float(original) % 360.0)
+        else:
+            out.append(math.degrees(math.atan2(float(sin_v), float(cos_v))) % 360.0)
+    return out
+
+
+def _max_abs_frame_delta(values: List[float], angle: bool = False) -> float:
+    if len(values) < 2:
+        return 0.0
+    deltas: List[float] = []
+    for prev, cur in zip(values[:-1], values[1:]):
+        if angle:
+            delta = _angle_diff_deg(prev, cur)
+            if delta is None:
+                continue
+            deltas.append(float(delta))
+        elif _finite(prev) and _finite(cur):
+            deltas.append(abs(float(cur) - float(prev)))
+    return float(max(deltas)) if deltas else 0.0
+
+
+def _max_abs_smoothing_change(before: List[float], after: List[float], angle: bool = False) -> float:
+    changes: List[float] = []
+    for old, new in zip(before, after):
+        if angle:
+            delta = _angle_diff_deg(old, new)
+            if delta is None:
+                continue
+            changes.append(float(delta))
+        elif _finite(old) and _finite(new):
+            changes.append(abs(float(new) - float(old)))
+    return float(max(changes)) if changes else 0.0
+
+
+def _record_direct_motion_smoothing(
+    quality: Dict[str, Any],
+    final_class: str,
+    label: str,
+    field: str,
+    requested_window: int,
+    actual_window: Optional[int],
+    before: List[float],
+    after: List[float],
+    angle: bool = False,
+) -> None:
+    stats = quality["direct_motion_smoothing"]
+    class_stats = stats["actual_windows_by_class"].setdefault(final_class, {})
+    field_stats = class_stats.setdefault(field, {})
+    field_stats[str(actual_window) if actual_window is not None else "not_smoothed"] = field_stats.get(str(actual_window) if actual_window is not None else "not_smoothed", 0) + 1
+
+    if actual_window is None:
+        stats["too_short_or_unsmoothed_track_labels"].add(label)
+        stats["too_short_or_unsmoothed_track_count"] = len(stats["too_short_or_unsmoothed_track_labels"])
+        stats["too_short_or_unsmoothed_tracks"].append({"track": label, "class": final_class, "field": field, "length": len(before)})
+    elif actual_window < int(requested_window):
+        stats["shrunk_window_track_labels"].add(label)
+        stats["shrunk_window_track_count"] = len(stats["shrunk_window_track_labels"])
+        stats["shrunk_window_tracks"].append(
+            {
+                "track": label,
+                "class": final_class,
+                "field": field,
+                "requested_window": int(requested_window),
+                "actual_window": int(actual_window),
+                "length": len(before),
+            }
+        )
+
+    before_key = f"max_abs_delta_{field}_before"
+    after_key = f"max_abs_delta_{field}_after"
+    change_key = f"max_abs_smoothing_change_{field}"
+    field_delta = stats["field_delta_summary"]
+    field_delta[before_key] = max(float(field_delta.get(before_key, 0.0)), _max_abs_frame_delta(before, angle))
+    field_delta[after_key] = max(float(field_delta.get(after_key, 0.0)), _max_abs_frame_delta(after, angle))
+    field_delta[change_key] = max(float(field_delta.get(change_key, 0.0)), _max_abs_smoothing_change(before, after, angle))
+
+
+def _direct_smooth_field(
+    values: List[float],
+    final_class: str,
+    label: str,
+    field: str,
+    window_config: Dict[str, int],
+    passes: int,
+    quality: Dict[str, Any],
+    angle: bool = False,
+) -> List[float]:
+    if not ENABLE_DIRECT_MOTION_FIELD_SMOOTHING:
+        return [float(v) for v in values]
+    requested_window = _motion_window_for_class(window_config, final_class)
+    actual_window = _adapt_direct_smooth_window(len(values), requested_window, MOTION_SMOOTH_POLYORDER)
+    if angle:
+        smoothed = smooth_angle_degrees(values, requested_window, MOTION_SMOOTH_POLYORDER, passes)
+    else:
+        smoothed = smooth_numeric_series(values, requested_window, MOTION_SMOOTH_POLYORDER, passes)
+    _record_direct_motion_smoothing(quality, final_class, label, field, requested_window, actual_window, values, smoothed, angle)
+    return smoothed
+
+
 def _valid_dimensions(rows: List[Dict[str, Any]], quality: Dict[str, Any]) -> Tuple[List[float], List[float]]:
     widths = [float(row["raw_width"]) for row in rows if _finite(row.get("raw_width")) and row["raw_width"] > 0]
     lengths = [float(row["raw_length"]) for row in rows if _finite(row.get("raw_length")) and row["raw_length"] > 0]
@@ -1428,6 +1667,53 @@ def smooth_track_and_refine_motion(
     motion_headings, stable_motion_headings = _compute_motion_headings(xs, ys, frames, frame_rate)
     speeds = [math.hypot(vx, vy) for vx, vy in zip(x_vel, y_vel)]
     headings = refine_heading_for_visualization(rows, motion_headings, stable_motion_headings, speeds, logger, label)
+    if ENABLE_DIRECT_MOTION_FIELD_SMOOTHING:
+        x_vel = _direct_smooth_field(
+            x_vel,
+            final_class,
+            label,
+            "xVelocity",
+            VELOCITY_SMOOTH_WINDOW_BY_CLASS,
+            VELOCITY_EXTRA_SMOOTH_PASSES,
+            quality,
+        )
+        y_vel = _direct_smooth_field(
+            y_vel,
+            final_class,
+            label,
+            "yVelocity",
+            VELOCITY_SMOOTH_WINDOW_BY_CLASS,
+            VELOCITY_EXTRA_SMOOTH_PASSES,
+            quality,
+        )
+        x_acc = _direct_smooth_field(
+            x_acc,
+            final_class,
+            label,
+            "xAcceleration",
+            ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
+            ACCELERATION_EXTRA_SMOOTH_PASSES,
+            quality,
+        )
+        y_acc = _direct_smooth_field(
+            y_acc,
+            final_class,
+            label,
+            "yAcceleration",
+            ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
+            ACCELERATION_EXTRA_SMOOTH_PASSES,
+            quality,
+        )
+        headings = _direct_smooth_field(
+            headings,
+            final_class,
+            label,
+            "heading",
+            HEADING_DIRECT_SMOOTH_WINDOW_BY_CLASS,
+            HEADING_EXTRA_SMOOTH_PASSES,
+            quality,
+            angle=True,
+        )
     return xs, ys, headings, x_vel, y_vel, x_acc, y_acc
 
 
@@ -1581,12 +1867,60 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
             f"trackId={track_id}",
         )
 
-        for lifetime, (row, x, y, heading, vx, vy, ax, ay) in enumerate(zip(rows, xs, ys, headings, x_vel, y_vel, x_acc, y_acc), start=1):
+        lon_vel: List[float] = []
+        lat_vel: List[float] = []
+        lon_acc: List[float] = []
+        lat_acc: List[float] = []
+        for heading, vx, vy, ax, ay in zip(headings, x_vel, y_vel, x_acc, y_acc):
             theta = math.radians(heading)
-            lon_v = vx * math.sin(theta) + vy * math.cos(theta)
-            lat_v = vx * (-math.cos(theta)) + vy * math.sin(theta)
-            lon_a = ax * math.sin(theta) + ay * math.cos(theta)
-            lat_a = ax * (-math.cos(theta)) + ay * math.sin(theta)
+            lon_vel.append(vx * math.sin(theta) + vy * math.cos(theta))
+            lat_vel.append(vx * (-math.cos(theta)) + vy * math.sin(theta))
+            lon_acc.append(ax * math.sin(theta) + ay * math.cos(theta))
+            lat_acc.append(ax * (-math.cos(theta)) + ay * math.sin(theta))
+
+        if ENABLE_DIRECT_MOTION_FIELD_SMOOTHING:
+            label = f"trackId={track_id}"
+            lon_vel = _direct_smooth_field(
+                lon_vel,
+                final_class,
+                label,
+                "lonVelocity",
+                VELOCITY_SMOOTH_WINDOW_BY_CLASS,
+                VELOCITY_EXTRA_SMOOTH_PASSES,
+                quality,
+            )
+            lat_vel = _direct_smooth_field(
+                lat_vel,
+                final_class,
+                label,
+                "latVelocity",
+                VELOCITY_SMOOTH_WINDOW_BY_CLASS,
+                VELOCITY_EXTRA_SMOOTH_PASSES,
+                quality,
+            )
+            lon_acc = _direct_smooth_field(
+                lon_acc,
+                final_class,
+                label,
+                "lonAcceleration",
+                ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
+                ACCELERATION_EXTRA_SMOOTH_PASSES,
+                quality,
+            )
+            lat_acc = _direct_smooth_field(
+                lat_acc,
+                final_class,
+                label,
+                "latAcceleration",
+                ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
+                ACCELERATION_EXTRA_SMOOTH_PASSES,
+                quality,
+            )
+
+        for lifetime, (row, x, y, heading, vx, vy, ax, ay, lon_v, lat_v, lon_a, lat_a) in enumerate(
+            zip(rows, xs, ys, headings, x_vel, y_vel, x_acc, y_acc, lon_vel, lat_vel, lon_acc, lat_acc),
+            start=1,
+        ):
             tracks_rows.append(
                 {
                     "trackId": track_id,
@@ -1700,6 +2034,25 @@ def _quality_template() -> Dict[str, Any]:
             "min_displacement_for_heading": MIN_DISPLACEMENT_FOR_HEADING,
             "low_speed_threshold": LOW_SPEED_THRESHOLD,
             "max_heading_jump_deg": MAX_HEADING_JUMP_DEG,
+        },
+        "direct_motion_smoothing": {
+            "enabled": ENABLE_DIRECT_MOTION_FIELD_SMOOTHING,
+            "method": MOTION_SMOOTH_METHOD,
+            "velocity_smooth_window_by_class": dict(VELOCITY_SMOOTH_WINDOW_BY_CLASS),
+            "acceleration_smooth_window_by_class": dict(ACCELERATION_SMOOTH_WINDOW_BY_CLASS),
+            "heading_direct_smooth_window_by_class": dict(HEADING_DIRECT_SMOOTH_WINDOW_BY_CLASS),
+            "motion_smooth_polyorder": MOTION_SMOOTH_POLYORDER,
+            "velocity_extra_smooth_passes": VELOCITY_EXTRA_SMOOTH_PASSES,
+            "acceleration_extra_smooth_passes": ACCELERATION_EXTRA_SMOOTH_PASSES,
+            "heading_extra_smooth_passes": HEADING_EXTRA_SMOOTH_PASSES,
+            "actual_windows_by_class": {},
+            "too_short_or_unsmoothed_track_count": 0,
+            "too_short_or_unsmoothed_track_labels": set(),
+            "too_short_or_unsmoothed_tracks": [],
+            "shrunk_window_track_count": 0,
+            "shrunk_window_track_labels": set(),
+            "shrunk_window_tracks": [],
+            "field_delta_summary": {},
         },
         "outlier_frame_count": 0,
         "split_track_count": 0,
@@ -2281,6 +2634,14 @@ def convert_dataset(
     log_line("INFO", f"lane_id_minus_one_records={quality.get('lane_id_minus_one_records', 0)}")
     log_line("INFO", f"missing_ratio_parameters={quality['missing_ratio_parameters']}")
     log_line("INFO", f"heading_parameters={quality['heading_parameters']}")
+    log_line("INFO", f"direct_motion_smoothing_enabled={quality['direct_motion_smoothing']['enabled']}")
+    log_line("INFO", f"velocity_smooth_window_by_class={quality['direct_motion_smoothing']['velocity_smooth_window_by_class']}")
+    log_line("INFO", f"acceleration_smooth_window_by_class={quality['direct_motion_smoothing']['acceleration_smooth_window_by_class']}")
+    log_line("INFO", f"heading_direct_smooth_window_by_class={quality['direct_motion_smoothing']['heading_direct_smooth_window_by_class']}")
+    log_line("INFO", f"direct_motion_actual_windows_by_class={quality['direct_motion_smoothing']['actual_windows_by_class']}")
+    log_line("INFO", f"direct_motion_too_short_or_unsmoothed_track_count={quality['direct_motion_smoothing']['too_short_or_unsmoothed_track_count']}")
+    log_line("INFO", f"direct_motion_shrunk_window_track_count={quality['direct_motion_smoothing']['shrunk_window_track_count']}")
+    log_line("INFO", f"direct_motion_field_delta_summary={quality['direct_motion_smoothing']['field_delta_summary']}")
     log_line("INFO", f"short_track_filter_parameters={quality['short_track_filter_parameters']}")
     log_line("INFO", f"raw_track_count={quality['missing_ratio_summary']['raw_track_count']}")
     log_line("INFO", f"kept_track_count={quality['missing_ratio_summary']['kept_track_count']}")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import json
 import logging
 import math
@@ -64,6 +65,7 @@ ALL_CLASSES = [
 
 VEHICLE_CLASSES = {"car", "truck", "bus", "freight_car", "van", "motor", "tricycle", "awning-tricycle"}
 VRU_CLASSES = {"pedestrian", "people", "bicycle", "tricycle", "awning-tricycle", "motor"}
+STATIC_VEHICLE_CLASSES = {"car", "truck", "bus", "freight_car", "van"}
 
 SHORT_GAP_MAX = 5
 MEDIUM_GAP_MAX = 15
@@ -146,7 +148,43 @@ STATIC_GATE = {
     "max_mean_speed": 0.2,
     "static_ratio_threshold": 0.8,
     "per_frame_motion_threshold": 0.05,
-    "filter_classes": sorted(VEHICLE_CLASSES),
+    "filter_classes": sorted(STATIC_VEHICLE_CLASSES),
+}
+
+LIGHT_VRU_STATIC_GATE = {
+    "motor": {
+        "min_track_length": 60,
+        "max_stationary_extent": 1.5,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+    "tricycle": {
+        "min_track_length": 60,
+        "max_stationary_extent": 1.5,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+    "awning-tricycle": {
+        "min_track_length": 60,
+        "max_stationary_extent": 1.5,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+}
+
+VRU_STATIC_GATE = {
+    "pedestrian": {
+        "min_track_length": 90,
+        "max_stationary_extent": 1.0,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+    "people": {
+        "min_track_length": 90,
+        "max_stationary_extent": 1.0,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+    "bicycle": {
+        "min_track_length": 60,
+        "max_stationary_extent": 1.5,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
 }
 
 RECORDING_META_FIELDS = [
@@ -308,9 +346,14 @@ class ConversionError(RuntimeError):
 
 
 def configure_logger(log_path: Path = DEFAULT_LOG_PATH) -> logging.Logger:
+    log_path = Path(log_path)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = log_path.with_name(f"{log_path.stem}_{timestamp}{log_path.suffix}")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("standard_trajectory_converter")
     logger.setLevel(logging.INFO)
+    for handler in logger.handlers:
+        handler.close()
     logger.handlers.clear()
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     fh = logging.FileHandler(log_path, encoding="utf-8")
@@ -365,7 +408,11 @@ def _write_csv(path: Path, fieldnames: List[str], rows: Iterable[Dict[str, Any]]
         writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow({field: _format_value(field, row.get(field, "")) for field in fieldnames})
+            _write_formatted_row(writer, fieldnames, row)
+
+
+def _write_formatted_row(writer: csv.DictWriter, fieldnames: List[str], row: Dict[str, Any]) -> None:
+    writer.writerow({field: _format_value(field, row.get(field, "")) for field in fieldnames})
 
 
 def _read_csv_rows(path: Path) -> Tuple[List[str], List[Dict[str, str]]]:
@@ -426,16 +473,50 @@ def _export_final_csv(source_path: Path, target_path: Path, columns: List[str], 
 
 
 def _export_final_tracks_csv(source_path: Path, target_path: Path, columns: List[str], logger: logging.Logger) -> None:
-    source_fields, rows = _read_csv_rows(source_path)
-    missing_columns = [column for column in columns if column not in source_fields]
-    if missing_columns:
-        logger.warning(
-            "Final Data export %s is missing source columns %s from %s; blank values will be written.",
-            target_path.name,
-            missing_columns,
-            source_path,
-        )
-    _write_csv(target_path, columns, fix_lane_id_minus_one_for_final_data(rows))
+    with source_path.open("r", newline="", encoding="utf-8") as source_fh, target_path.open("w", newline="", encoding="utf-8") as target_fh:
+        reader = csv.DictReader(source_fh)
+        source_fields = list(reader.fieldnames or [])
+        missing_columns = [column for column in columns if column not in source_fields]
+        if missing_columns:
+            logger.warning(
+                "Final Data export %s is missing source columns %s from %s; blank values will be written.",
+                target_path.name,
+                missing_columns,
+                source_path,
+            )
+        if "trackId" not in source_fields:
+            raise ConversionError(f"Final Data export {target_path.name} requires source column 'trackId' in {source_path}.")
+
+        writer = csv.DictWriter(target_fh, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+
+        current_track_id: Optional[str] = None
+        current_rows: List[Dict[str, str]] = []
+        written_track_ids: set[str] = set()
+
+        def flush_current_track() -> None:
+            if not current_rows:
+                return
+            for fixed_row in fix_lane_id_minus_one_for_final_data(current_rows):
+                _write_formatted_row(writer, columns, fixed_row)
+
+        for row in reader:
+            track_id = str(row.get("trackId", ""))
+            if current_track_id is None:
+                current_track_id = track_id
+            elif track_id != current_track_id:
+                flush_current_track()
+                written_track_ids.add(current_track_id)
+                if track_id in written_track_ids:
+                    raise ConversionError(
+                        "Final Data tracks export requires rows for each trackId to be contiguous; "
+                        f"trackId={track_id} appears again in {source_path}. Please sort by trackId/frame before export."
+                    )
+                current_track_id = track_id
+                current_rows = []
+            current_rows.append(row)
+
+        flush_current_track()
 
 
 def export_final_data(
@@ -1710,11 +1791,40 @@ def _track_motion_metrics(track_meta: Dict[str, Any], rows: List[Dict[str, Any]]
         signals.append("high_static_ratio")
 
     cls = track_meta["class"]
-    is_static = (
+    num_frames = int(track_meta["numFrames"])
+    standard_vehicle_static = (
         cls in set(STATIC_GATE["filter_classes"])
-        and int(track_meta["numFrames"]) >= int(STATIC_GATE["min_track_length"])
+        and num_frames >= int(STATIC_GATE["min_track_length"])
         and "low_stationary_extent" in signals
     )
+    light_vru_cfg = LIGHT_VRU_STATIC_GATE.get(cls)
+    light_vru_static = False
+    light_vru_reason: List[str] = []
+    if light_vru_cfg is not None and num_frames >= int(light_vru_cfg["min_track_length"]):
+        light_vru_signal_checks = {
+            "low_stationary_extent": stationary_extent <= float(light_vru_cfg["max_stationary_extent"]),
+            "low_mean_speed": mean_speed <= float(STATIC_GATE["max_mean_speed"]),
+            "high_static_ratio": static_ratio >= float(STATIC_GATE["static_ratio_threshold"]),
+        }
+        light_vru_static = all(light_vru_signal_checks.get(name, False) for name in light_vru_cfg["required_signals"])
+        light_vru_reason = [name for name in light_vru_cfg["required_signals"] if light_vru_signal_checks.get(name, False)]
+    vru_cfg = VRU_STATIC_GATE.get(cls)
+    vru_static = False
+    vru_reason: List[str] = []
+    if vru_cfg is not None and num_frames >= int(vru_cfg["min_track_length"]):
+        vru_signal_checks = {
+            "low_stationary_extent": stationary_extent <= float(vru_cfg["max_stationary_extent"]),
+            "low_mean_speed": mean_speed <= float(STATIC_GATE["max_mean_speed"]),
+            "high_static_ratio": static_ratio >= float(STATIC_GATE["static_ratio_threshold"]),
+        }
+        vru_static = all(vru_signal_checks.get(name, False) for name in vru_cfg["required_signals"])
+        vru_reason = [name for name in vru_cfg["required_signals"] if vru_signal_checks.get(name, False)]
+    is_static = standard_vehicle_static or light_vru_static or vru_static
+    filter_reason = ",".join(signals) if standard_vehicle_static else ""
+    if light_vru_static:
+        filter_reason = "light_vru_static_gate," + ",".join(light_vru_reason)
+    elif vru_static:
+        filter_reason = "vru_static_gate," + ",".join(vru_reason)
     return {
         "trackId": int(track_meta["trackId"]),
         "raw_object_id": int(track_meta.get("raw_object_id", track_meta["trackId"])),
@@ -1733,7 +1843,7 @@ def _track_motion_metrics(track_meta: Dict[str, Any], rows: List[Dict[str, Any]]
         "max_speed": max_speed,
         "static_ratio": static_ratio,
         "is_static": is_static,
-        "filter_reason": ",".join(signals) if is_static else "",
+        "filter_reason": filter_reason,
     }
 
 
@@ -1773,6 +1883,8 @@ def _moving_filtered_tracks(
 
     gate_report = {
         "parameters": STATIC_GATE,
+        "light_vru_parameters": LIGHT_VRU_STATIC_GATE,
+        "vru_parameters": VRU_STATIC_GATE,
         "original_track_count": len(tracks_meta),
         "filtered_track_count": len(filtered_ids),
         "kept_track_count": len(filtered_meta),
@@ -2122,6 +2234,8 @@ def convert_dataset(
             ),
         )
     log_line("INFO", f"static_gate_parameters={STATIC_GATE}")
+    log_line("INFO", f"light_vru_static_gate_parameters={LIGHT_VRU_STATIC_GATE}")
+    log_line("INFO", f"vru_static_gate_parameters={VRU_STATIC_GATE}")
     log_line(
         "INFO",
         "moving_filtered original_tracks=%s filtered_tracks=%s kept_tracks=%s"

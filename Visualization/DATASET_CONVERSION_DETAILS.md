@@ -73,7 +73,7 @@ Visualization/Adjusted results/<folderName>/
 
 `full` 是完整版本，保留所有通过基础清洗、补全、修复和平滑后的最终轨迹。
 
-`moving_filtered` 是过滤版本。它基于 `full` 结果先删除高置信疑似 ID 断裂组，再删除长期静止的机动车类轨迹。该过滤不会修改 `full`。
+`moving_filtered` 是过滤版本。它基于 `full` 结果先删除高置信疑似 ID 断裂组，再按标准车辆、轻型弱势车辆、行人与自行车三类静止门控删除长期静止轨迹。该过滤不会修改 `full`。
 
 ### Final Data
 
@@ -312,9 +312,11 @@ suspected_id_fragmentation_drop_all_related_tracklets
 
 ### 静止过滤
 
-静止过滤参数位于 `converter.py` 的 `STATIC_GATE`：
+静止过滤参数位于 `converter.py` 的三组配置：`STATIC_GATE`、`LIGHT_VRU_STATIC_GATE` 和 `VRU_STATIC_GATE`。
 
 ```python
+STATIC_VEHICLE_CLASSES = {"car", "truck", "bus", "freight_car", "van"}
+
 STATIC_GATE = {
     "min_track_length": 30,
     "max_displacement": 1.0,
@@ -323,7 +325,43 @@ STATIC_GATE = {
     "max_mean_speed": 0.2,
     "static_ratio_threshold": 0.8,
     "per_frame_motion_threshold": 0.05,
-    "filter_classes": sorted(VEHICLE_CLASSES),
+    "filter_classes": sorted(STATIC_VEHICLE_CLASSES),
+}
+
+LIGHT_VRU_STATIC_GATE = {
+    "motor": {
+        "min_track_length": 60,
+        "max_stationary_extent": 1.5,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+    "tricycle": {
+        "min_track_length": 60,
+        "max_stationary_extent": 1.5,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+    "awning-tricycle": {
+        "min_track_length": 60,
+        "max_stationary_extent": 1.5,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+}
+
+VRU_STATIC_GATE = {
+    "pedestrian": {
+        "min_track_length": 90,
+        "max_stationary_extent": 1.0,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+    "people": {
+        "min_track_length": 90,
+        "max_stationary_extent": 1.0,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
+    "bicycle": {
+        "min_track_length": 60,
+        "max_stationary_extent": 1.5,
+        "required_signals": ["low_stationary_extent", "low_mean_speed", "high_static_ratio"],
+    },
 }
 ```
 
@@ -334,13 +372,13 @@ displacement / path_length / stationary_extent / per_frame_motion_threshold: m
 mean_speed / max_speed: m/s
 ```
 
-当前静止判定的必要条件是：
+当前静止判定分三层：
 
-1. 轨迹类别属于 `filter_classes`。
-2. `numFrames >= min_track_length`。
-3. `stationary_extent <= max_stationary_extent`。
+1. 标准车辆类：`car, truck, bus, freight_car, van`。继续使用原始车辆静止筛除逻辑：类别属于 `STATIC_GATE["filter_classes"]`，`numFrames >= STATIC_GATE["min_track_length"]`，且 `signals` 中包含 `low_stationary_extent`。
+2. 轻型弱势车辆类：`motor, tricycle, awning-tricycle`。使用 `LIGHT_VRU_STATIC_GATE`，必须达到对应 `min_track_length`，并同时满足该类别自己的 `max_stationary_extent`、`low_mean_speed` 和 `high_static_ratio` 条件。`filter_reason` 以 `light_vru_static_gate` 开头。
+3. 行人与自行车类：`pedestrian, people, bicycle`。使用 `VRU_STATIC_GATE`，其中 `pedestrian/people` 要求 `numFrames >= 90` 且 `stationary_extent <= 1.0`，`bicycle` 要求 `numFrames >= 60` 且 `stationary_extent <= 1.5`，并同时满足 `low_mean_speed` 和 `high_static_ratio`。`filter_reason` 以 `vru_static_gate` 开头。
 
-`displacement <= max_displacement`、`mean_speed <= max_mean_speed`、`static_ratio >= static_ratio_threshold`、`path_length <= max_path_length` 会记录到 `filter_reason`，但当前代码不把它们作为最终删除的必要条件。
+标准车辆类中，`displacement <= max_displacement`、`mean_speed <= max_mean_speed`、`static_ratio >= static_ratio_threshold`、`path_length <= max_path_length` 会记录到 `filter_reason`，但不作为最终删除的必要条件。轻型弱势车辆类和行人与自行车类不会复用 `STATIC_GATE["max_stationary_extent"]`，而是直接使用各自配置中的 `max_stationary_extent` 与 `stationary_extent` 数值比较。
 
 `stationary_extent` 使用轨迹点到中位中心点距离的 95% 分位数乘以 2，用于避免少量异常点污染首尾位移，也避免把逐帧检测抖动累计成很长的假路径。
 
@@ -620,7 +658,7 @@ latAcceleration = xAcceleration * (-cos(theta)) + yAcceleration * sin(theta)
 | `numVehicles/numVRUs` | 当前版本车辆与 VRU 轨迹数量。 |
 | `orthoPxToMeter` | 像素到米比例估计值。 |
 | `quality` | 类别跳变、短轨迹、重复帧、整体缺帧比例、丢弃轨迹、插值、异常点、尺寸异常、平滑参数等质量统计。 |
-| `staticGate` | 静止门控参数、每条轨迹运动统计、被过滤轨迹列表。 |
+| `staticGate` | 静止门控参数、轻型弱势车辆静止参数、行人与自行车静止参数、每条轨迹运动统计、被过滤轨迹列表。 |
 | `fragmentationFilter` | 疑似 ID 断裂过滤参数、策略、候选组、组内 raw ID、评分和删除数量。`full` 中 `use_fragmentation_filter=false`。 |
 
 ## 十二、可视化读取逻辑

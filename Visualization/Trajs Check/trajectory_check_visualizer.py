@@ -91,10 +91,22 @@ FIGURE_ADJUST = {
 }
 AXIS_TITLE_PAD = 9
 AXIS_LABEL_PAD = 6
-SUMMARY_FONT_SIZE = 7.2
-SUMMARY_COLUMN_WIDTH = 31
-SUMMARY_RIGHT_COLUMN_X = 0.66
-SUMMARY_LINE_SPACING = 1.05
+FIGURE_TITLE_FONT_SIZE = 20      # 顶部总标题
+AXIS_TITLE_FONT_SIZE = 18        # 每个子图标题
+AXIS_LABEL_FONT_SIZE = 16      # x/y 轴标签
+AXIS_TICK_FONT_SIZE = 14        # 坐标轴刻度
+LEGEND_FONT_SIZE = 12           # 图例
+ANNOTATION_FONT_SIZE = 12       # 图内标注文字
+ABNORMAL_LABEL_FONT_SIZE = 12     # abnormal counts 横轴标签
+SUMMARY_FONT_SIZE = 12          # 右下角 summary 文本
+'''
+SUMMARY_COLUMN_WIDTH     控制每列每行能放多少字
+SUMMARY_RIGHT_COLUMN_X   控制右列从多靠右的位置开始
+SUMMARY_LINE_SPACING     控制上下行之间的距离
+'''
+SUMMARY_COLUMN_WIDTH = 32
+SUMMARY_RIGHT_COLUMN_X = 0.60
+SUMMARY_LINE_SPACING = 1.50
 
 
 def find_csv_files(folder_path):
@@ -349,13 +361,16 @@ def _plot_y_equals_x(ax, x_values, y_values):
 
 def _apply_axis_spacing(axes):
     for ax in axes:
+        ax.title.set_fontsize(AXIS_TITLE_FONT_SIZE)
+        ax.xaxis.label.set_size(AXIS_LABEL_FONT_SIZE)
+        ax.yaxis.label.set_size(AXIS_LABEL_FONT_SIZE)
         try:
             ax.title.set_pad(AXIS_TITLE_PAD)
         except AttributeError:
             ax.title.set_position((0.5, 1.04))
         ax.xaxis.labelpad = AXIS_LABEL_PAD
         ax.yaxis.labelpad = AXIS_LABEL_PAD
-        ax.tick_params(axis="both", labelsize=9, pad=3)
+        ax.tick_params(axis="both", labelsize=AXIS_TICK_FONT_SIZE, pad=3)
 
 
 def _draw_summary_columns(ax, text, fontsize=SUMMARY_FONT_SIZE):
@@ -408,7 +423,7 @@ def plot_track_check(track_df, track_meta_row, folder_name):
         summary["class"],
         summary["numFrames"],
     )
-    fig.suptitle(title, y=0.975)
+    fig.suptitle(title, y=0.975, fontsize=FIGURE_TITLE_FONT_SIZE)
     try:
         fig.canvas.manager.set_window_title(title)
     except Exception:
@@ -428,7 +443,7 @@ def plot_track_check(track_df, track_meta_row, folder_name):
     ax.set_xlabel("xCenter")
     ax.set_ylabel("yCenter")
     ax.axis("equal")
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     ax = axes[1]
     sc = ax.scatter(checked["xCenter"], checked["yCenter"], c=checked["speed_xy"], s=12)
@@ -453,7 +468,7 @@ def plot_track_check(track_df, track_meta_row, folder_name):
     ax.set_title("Heading over frames")
     ax.set_xlabel("frame")
     ax.set_ylabel("heading (deg)")
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     ax = axes[4]
     for column in ["xVelocity", "yVelocity", "lonVelocity", "latVelocity"]:
@@ -467,7 +482,7 @@ def plot_track_check(track_df, track_meta_row, folder_name):
     ax.set_title("Velocity components")
     ax.set_xlabel("frame")
     ax.set_ylabel("velocity (m/s)")
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     ax = axes[5]
     for column in ["xAcceleration", "yAcceleration", "lonAcceleration", "latAcceleration"]:
@@ -481,27 +496,27 @@ def plot_track_check(track_df, track_meta_row, folder_name):
     ax.set_title("Acceleration components")
     ax.set_xlabel("frame")
     ax.set_ylabel("acceleration (m/s^2)")
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     ax = axes[6]
     ax.plot(checked["frame"], checked["speed_xy"], label="speed_xy")
     ax.plot(checked["frame"], checked["speed_lonlat"], label="speed_lonlat")
     _mark_abnormal_points(ax, checked, ["speed_xy", "speed_lonlat"], ["abnormal_speed_error"])
-    ax.text(0.02, 0.95, "max_abs_speed_error=%s" % _format_number(summary["max_abs_speed_error"]), transform=ax.transAxes, va="top")
+    ax.text(0.02, 0.95, "max_abs_speed_error=%s" % _format_number(summary["max_abs_speed_error"]), transform=ax.transAxes, va="top", fontsize=ANNOTATION_FONT_SIZE)
     ax.set_title("Speed consistency")
     ax.set_xlabel("frame")
     ax.set_ylabel("speed (m/s)")
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     ax = axes[7]
     ax.plot(checked["frame"], checked["acc_xy"], label="acc_xy")
     ax.plot(checked["frame"], checked["acc_lonlat"], label="acc_lonlat")
     _mark_abnormal_points(ax, checked, ["acc_xy", "acc_lonlat"], ["abnormal_acc_error"])
-    ax.text(0.02, 0.95, "max_abs_acc_error=%s" % _format_number(summary["max_abs_acc_error"]), transform=ax.transAxes, va="top")
+    ax.text(0.02, 0.95, "max_abs_acc_error=%s" % _format_number(summary["max_abs_acc_error"]), transform=ax.transAxes, va="top", fontsize=ANNOTATION_FONT_SIZE)
     ax.set_title("Acceleration consistency")
     ax.set_xlabel("frame")
     ax.set_ylabel("acceleration (m/s^2)")
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     ax = axes[8]
     ax.plot(checked["frame"], checked["angle_error"], label="angle_error")
@@ -510,7 +525,7 @@ def plot_track_check(track_df, track_meta_row, folder_name):
     ax.set_title("Motion heading vs heading error")
     ax.set_xlabel("frame")
     ax.set_ylabel("angle error (deg)")
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     ax = axes[9]
     for column in ["delta_speed", "delta_lonVelocity", "delta_latVelocity", "delta_heading"]:
@@ -524,7 +539,7 @@ def plot_track_check(track_df, track_meta_row, folder_name):
     ax.set_title("Frame-to-frame jumps")
     ax.set_xlabel("frame")
     ax.set_ylabel("delta")
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     ax = axes[10]
     counts = [int(checked[column].sum()) for column in ABNORMAL_COLUMNS]
@@ -533,7 +548,7 @@ def plot_track_check(track_df, track_meta_row, folder_name):
     ax.set_title("Abnormal counts")
     ax.set_ylabel("frames")
     ax.set_xticks(range(len(counts)))
-    ax.set_xticklabels(labels, rotation=58, ha="right", fontsize=7)
+    ax.set_xticklabels(labels, rotation=58, ha="right", fontsize=ABNORMAL_LABEL_FONT_SIZE)
     ax.margins(x=0.02)
 
     ax = axes[11]
@@ -604,7 +619,7 @@ def _hist(ax, series, title, xlabel, bins=80):
 
 def _boxplot_by_class(ax, checked, value_column, title, ylabel):
     if "class" not in checked.columns:
-        ax.text(0.0, 0.5, "tracksMeta 中没有 class 字段", transform=ax.transAxes)
+        ax.text(0.0, 0.5, "tracksMeta 中没有 class 字段", transform=ax.transAxes, fontsize=ANNOTATION_FONT_SIZE)
         ax.set_title(title)
         return
     classes = []
@@ -650,7 +665,7 @@ def plot_summary(tracks_df, tracks_meta_df, folder_name):
     fig, axes = plt.subplots(4, 3, figsize=SUMMARY_FIGSIZE, gridspec_kw=dict(GRID_KW))
     axes = axes.ravel()
     title = "summary folder=%s" % folder_name
-    fig.suptitle(title, y=0.975)
+    fig.suptitle(title, y=0.975, fontsize=FIGURE_TITLE_FONT_SIZE)
     try:
         fig.canvas.manager.set_window_title(title)
     except Exception:
@@ -669,14 +684,14 @@ def plot_summary(tracks_df, tracks_meta_df, folder_name):
     axes[7].set_title("speed_xy vs speed_lonlat")
     axes[7].set_xlabel("speed_xy")
     axes[7].set_ylabel("speed_lonlat")
-    axes[7].legend(loc="best", fontsize=8)
+    axes[7].legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     axes[8].scatter(checked["acc_xy"], checked["acc_lonlat"], s=5, alpha=0.4)
     _plot_y_equals_x(axes[8], checked["acc_xy"], checked["acc_lonlat"])
     axes[8].set_title("acc_xy vs acc_lonlat")
     axes[8].set_xlabel("acc_xy")
     axes[8].set_ylabel("acc_lonlat")
-    axes[8].legend(loc="best", fontsize=8)
+    axes[8].legend(loc="best", fontsize=LEGEND_FONT_SIZE)
 
     _boxplot_by_class(axes[9], checked, "speed_xy", "speed_xy by class", "speed_xy (m/s)")
     _boxplot_by_class(axes[10], checked, "acc_xy", "acc_xy by class", "acc_xy (m/s^2)")

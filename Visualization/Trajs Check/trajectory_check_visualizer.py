@@ -91,14 +91,14 @@ FIGURE_ADJUST = {
 }
 AXIS_TITLE_PAD = 9
 AXIS_LABEL_PAD = 6
-FIGURE_TITLE_FONT_SIZE = 20      # 顶部总标题
-AXIS_TITLE_FONT_SIZE = 18        # 每个子图标题
-AXIS_LABEL_FONT_SIZE = 16      # x/y 轴标签
-AXIS_TICK_FONT_SIZE = 14        # 坐标轴刻度
-LEGEND_FONT_SIZE = 12           # 图例
-ANNOTATION_FONT_SIZE = 12       # 图内标注文字
-ABNORMAL_LABEL_FONT_SIZE = 12     # abnormal counts 横轴标签
-SUMMARY_FONT_SIZE = 12          # 右下角 summary 文本
+FIGURE_TITLE_FONT_SIZE = 14      # 顶部总标题
+AXIS_TITLE_FONT_SIZE = 12        # 每个子图标题
+AXIS_LABEL_FONT_SIZE = 8      # x/y 轴标签
+AXIS_TICK_FONT_SIZE = 8        # 坐标轴刻度
+LEGEND_FONT_SIZE = 8           # 图例
+ANNOTATION_FONT_SIZE = 8       # 图内标注文字
+ABNORMAL_LABEL_FONT_SIZE = 8     # abnormal counts 横轴标签
+SUMMARY_FONT_SIZE = 8          # 右下角 summary 文本
 '''
 SUMMARY_COLUMN_WIDTH     控制每列每行能放多少字
 SUMMARY_RIGHT_COLUMN_X   控制右列从多靠右的位置开始

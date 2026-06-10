@@ -82,41 +82,15 @@ SMOOTH_POLYORDER = 3
 SMOOTH_METHOD = "savgol"
 HEADING_SMOOTH_WINDOW = 5
 ENABLE_DIRECT_MOTION_FIELD_SMOOTHING = True
+ENABLE_ACCELERATION_FROM_SMOOTHED_VELOCITY = True
+ENABLE_LIGHT_ACCELERATION_SMOOTHING = True
 MOTION_SMOOTH_METHOD = "savgol"
 VELOCITY_SMOOTH_WINDOW_BY_CLASS = {
-    "car": 91,
-    "van": 91,
-    "truck": 91,
-    "bus": 91,
-    "freight_car": 91,
-    "motor": 61,
-    "tricycle": 61,
-    "awning-tricycle": 61,
-    "bicycle": 61,
-    "pedestrian": 31,
-    "people": 31,
-    "default": 61,
-}
-ACCELERATION_SMOOTH_WINDOW_BY_CLASS = {
-    "car": 121,
-    "van": 121,
-    "truck": 121,
-    "bus": 121,
-    "freight_car": 121,
-    "motor": 75,
-    "tricycle": 75,
-    "awning-tricycle": 75,
-    "bicycle": 75,
-    "pedestrian": 45,
-    "people": 45,
-    "default": 75,
-}
-HEADING_DIRECT_SMOOTH_WINDOW_BY_CLASS = {
-    "car": 75,
-    "van": 75,
-    "truck": 75,
-    "bus": 75,
-    "freight_car": 75,
+    "car": 61,
+    "van": 61,
+    "truck": 61,
+    "bus": 61,
+    "freight_car": 61,
     "motor": 45,
     "tricycle": 45,
     "awning-tricycle": 45,
@@ -125,8 +99,36 @@ HEADING_DIRECT_SMOOTH_WINDOW_BY_CLASS = {
     "people": 21,
     "default": 45,
 }
+ACCELERATION_LIGHT_SMOOTH_WINDOW_BY_CLASS = {
+    "car": 9,
+    "van": 9,
+    "truck": 9,
+    "bus": 9,
+    "freight_car": 9,
+    "motor": 7,
+    "tricycle": 7,
+    "awning-tricycle": 7,
+    "bicycle": 7,
+    "pedestrian": 5,
+    "people": 5,
+    "default": 7,
+}
+HEADING_DIRECT_SMOOTH_WINDOW_BY_CLASS = {
+    "car": 45,
+    "van": 45,
+    "truck": 45,
+    "bus": 45,
+    "freight_car": 45,
+    "motor": 31,
+    "tricycle": 31,
+    "awning-tricycle": 31,
+    "bicycle": 31,
+    "pedestrian": 15,
+    "people": 15,
+    "default": 31,
+}
 MOTION_SMOOTH_POLYORDER = 3
-ACCELERATION_EXTRA_SMOOTH_PASSES = 2
+ACCELERATION_EXTRA_SMOOTH_PASSES = 1
 VELOCITY_EXTRA_SMOOTH_PASSES = 1
 HEADING_EXTRA_SMOOTH_PASSES = 1
 MIN_DISPLACEMENT_FOR_HEADING = 0.05
@@ -1321,7 +1323,7 @@ def _motion_window_for_class(config: Dict[str, int], final_class: str) -> int:
 def _adapt_direct_smooth_window(length: int, requested_window: int, polyorder: int) -> Optional[int]:
     if length <= 0:
         return None
-    min_window = max(int(polyorder) + 3, 3)
+    min_window = max(int(polyorder) + 2, 3)
     if min_window % 2 == 0:
         min_window += 1
     if length < min_window:
@@ -1332,6 +1334,12 @@ def _adapt_direct_smooth_window(length: int, requested_window: int, polyorder: i
     if window < min_window:
         return None
     return window
+
+
+def _direct_savgol_polyorder(polyorder: int, window: int) -> int:
+    if window <= 5:
+        return min(max(int(polyorder), 1), 2)
+    return min(max(int(polyorder), 1), window - 2)
 
 
 def _fill_nan_numeric(values: List[float]) -> Tuple[np.ndarray, int]:
@@ -1382,7 +1390,7 @@ def smooth_numeric_series(values: List[float], window: int, polyorder: int, pass
     for _ in range(repeat):
         if savgol_filter is not None and MOTION_SMOOTH_METHOD == "savgol":
             try:
-                actual_polyorder = min(max(int(polyorder), 1), actual_window - 3)
+                actual_polyorder = _direct_savgol_polyorder(polyorder, actual_window)
                 out = savgol_filter(out, window_length=actual_window, polyorder=actual_polyorder, mode="interp")
                 continue
             except Exception:
@@ -1503,6 +1511,51 @@ def _direct_smooth_field(
         smoothed = smooth_numeric_series(values, requested_window, MOTION_SMOOTH_POLYORDER, passes)
     _record_direct_motion_smoothing(quality, final_class, label, field, requested_window, actual_window, values, smoothed, angle)
     return smoothed
+
+
+def _update_acceleration_consistency_stats(
+    quality: Dict[str, Any],
+    frames: List[int],
+    frame_rate: float,
+    x_vel: List[float],
+    y_vel: List[float],
+    x_acc: List[float],
+    y_acc: List[float],
+) -> None:
+    stats = quality["acceleration_consistency"]
+    x_acc_from_final_velocity = _differentiate(x_vel, frames, frame_rate)
+    y_acc_from_final_velocity = _differentiate(y_vel, frames, frame_rate)
+    for final_acc, velocity_acc in zip(x_acc, x_acc_from_final_velocity):
+        if _finite(final_acc) and _finite(velocity_acc):
+            stats["_x_abs_errors"].append(abs(float(final_acc) - float(velocity_acc)))
+    for final_acc, velocity_acc in zip(y_acc, y_acc_from_final_velocity):
+        if _finite(final_acc) and _finite(velocity_acc):
+            stats["_y_abs_errors"].append(abs(float(final_acc) - float(velocity_acc)))
+
+
+def _acceleration_error_summary(errors: List[float], axis: str) -> Dict[str, Any]:
+    if not errors:
+        return {
+            f"max_abs_{axis}Acceleration_consistency_error": 0.0,
+            f"mean_abs_{axis}Acceleration_consistency_error": 0.0,
+            f"p95_abs_{axis}Acceleration_consistency_error": 0.0,
+            f"{axis}Acceleration_consistency_sample_count": 0,
+        }
+    arr = np.asarray(errors, dtype=float)
+    return {
+        f"max_abs_{axis}Acceleration_consistency_error": float(np.max(arr)),
+        f"mean_abs_{axis}Acceleration_consistency_error": float(np.mean(arr)),
+        f"p95_abs_{axis}Acceleration_consistency_error": float(np.percentile(arr, 95)),
+        f"{axis}Acceleration_consistency_sample_count": int(arr.size),
+    }
+
+
+def _finalize_acceleration_consistency_stats(quality: Dict[str, Any]) -> None:
+    stats = quality["acceleration_consistency"]
+    x_errors = stats.pop("_x_abs_errors", [])
+    y_errors = stats.pop("_y_abs_errors", [])
+    stats.update(_acceleration_error_summary(x_errors, "x"))
+    stats.update(_acceleration_error_summary(y_errors, "y"))
 
 
 def _valid_dimensions(rows: List[Dict[str, Any]], quality: Dict[str, Any]) -> Tuple[List[float], List[float]]:
@@ -1686,24 +1739,6 @@ def smooth_track_and_refine_motion(
             VELOCITY_EXTRA_SMOOTH_PASSES,
             quality,
         )
-        x_acc = _direct_smooth_field(
-            x_acc,
-            final_class,
-            label,
-            "xAcceleration",
-            ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
-            ACCELERATION_EXTRA_SMOOTH_PASSES,
-            quality,
-        )
-        y_acc = _direct_smooth_field(
-            y_acc,
-            final_class,
-            label,
-            "yAcceleration",
-            ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
-            ACCELERATION_EXTRA_SMOOTH_PASSES,
-            quality,
-        )
         headings = _direct_smooth_field(
             headings,
             final_class,
@@ -1714,6 +1749,28 @@ def smooth_track_and_refine_motion(
             quality,
             angle=True,
         )
+        if ENABLE_ACCELERATION_FROM_SMOOTHED_VELOCITY:
+            x_acc = _differentiate(x_vel, frames, frame_rate)
+            y_acc = _differentiate(y_vel, frames, frame_rate)
+        if ENABLE_LIGHT_ACCELERATION_SMOOTHING:
+            x_acc = _direct_smooth_field(
+                x_acc,
+                final_class,
+                label,
+                "xAcceleration",
+                ACCELERATION_LIGHT_SMOOTH_WINDOW_BY_CLASS,
+                ACCELERATION_EXTRA_SMOOTH_PASSES,
+                quality,
+            )
+            y_acc = _direct_smooth_field(
+                y_acc,
+                final_class,
+                label,
+                "yAcceleration",
+                ACCELERATION_LIGHT_SMOOTH_WINDOW_BY_CLASS,
+                ACCELERATION_EXTRA_SMOOTH_PASSES,
+                quality,
+            )
     return xs, ys, headings, x_vel, y_vel, x_acc, y_acc
 
 
@@ -1878,44 +1935,7 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
             lon_acc.append(ax * math.sin(theta) + ay * math.cos(theta))
             lat_acc.append(ax * (-math.cos(theta)) + ay * math.sin(theta))
 
-        if ENABLE_DIRECT_MOTION_FIELD_SMOOTHING:
-            label = f"trackId={track_id}"
-            lon_vel = _direct_smooth_field(
-                lon_vel,
-                final_class,
-                label,
-                "lonVelocity",
-                VELOCITY_SMOOTH_WINDOW_BY_CLASS,
-                VELOCITY_EXTRA_SMOOTH_PASSES,
-                quality,
-            )
-            lat_vel = _direct_smooth_field(
-                lat_vel,
-                final_class,
-                label,
-                "latVelocity",
-                VELOCITY_SMOOTH_WINDOW_BY_CLASS,
-                VELOCITY_EXTRA_SMOOTH_PASSES,
-                quality,
-            )
-            lon_acc = _direct_smooth_field(
-                lon_acc,
-                final_class,
-                label,
-                "lonAcceleration",
-                ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
-                ACCELERATION_EXTRA_SMOOTH_PASSES,
-                quality,
-            )
-            lat_acc = _direct_smooth_field(
-                lat_acc,
-                final_class,
-                label,
-                "latAcceleration",
-                ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
-                ACCELERATION_EXTRA_SMOOTH_PASSES,
-                quality,
-            )
+        _update_acceleration_consistency_stats(quality, frames, frame_rate, x_vel, y_vel, x_acc, y_acc)
 
         for lifetime, (row, x, y, heading, vx, vy, ax, ay, lon_v, lat_v, lon_a, lat_a) in enumerate(
             zip(rows, xs, ys, headings, x_vel, y_vel, x_acc, y_acc, lon_vel, lat_vel, lon_acc, lat_acc),
@@ -2037,9 +2057,13 @@ def _quality_template() -> Dict[str, Any]:
         },
         "direct_motion_smoothing": {
             "enabled": ENABLE_DIRECT_MOTION_FIELD_SMOOTHING,
+            "acceleration_from_smoothed_velocity_enabled": ENABLE_ACCELERATION_FROM_SMOOTHED_VELOCITY,
+            "light_acceleration_smoothing_enabled": ENABLE_LIGHT_ACCELERATION_SMOOTHING,
+            "large_independent_acceleration_smoothing_enabled": False,
+            "lon_lat_independent_smoothing_enabled": False,
             "method": MOTION_SMOOTH_METHOD,
             "velocity_smooth_window_by_class": dict(VELOCITY_SMOOTH_WINDOW_BY_CLASS),
-            "acceleration_smooth_window_by_class": dict(ACCELERATION_SMOOTH_WINDOW_BY_CLASS),
+            "acceleration_light_smooth_window_by_class": dict(ACCELERATION_LIGHT_SMOOTH_WINDOW_BY_CLASS),
             "heading_direct_smooth_window_by_class": dict(HEADING_DIRECT_SMOOTH_WINDOW_BY_CLASS),
             "motion_smooth_polyorder": MOTION_SMOOTH_POLYORDER,
             "velocity_extra_smooth_passes": VELOCITY_EXTRA_SMOOTH_PASSES,
@@ -2053,6 +2077,11 @@ def _quality_template() -> Dict[str, Any]:
             "shrunk_window_track_labels": set(),
             "shrunk_window_tracks": [],
             "field_delta_summary": {},
+        },
+        "acceleration_consistency": {
+            "note": "Final accelerations are differentiated from final smoothed velocities, then optionally light-smoothed; small consistency errors are expected when light smoothing is enabled.",
+            "_x_abs_errors": [],
+            "_y_abs_errors": [],
         },
         "outlier_frame_count": 0,
         "split_track_count": 0,
@@ -2521,6 +2550,7 @@ def convert_dataset(
 
     fragments = _split_raw_tracks(raw_rows, frame_rate, logger, quality)
     tracks_meta, tracks_rows = _build_final_tracks(fragments, frame_rate, logger, quality)
+    _finalize_acceleration_consistency_stats(quality)
     missing_ratios = [float(item["missing_ratio"]) for item in quality["track_missing_stats"]]
     quality["missing_ratio_summary"] = {
         "raw_track_count": raw_object_count,
@@ -2635,13 +2665,18 @@ def convert_dataset(
     log_line("INFO", f"missing_ratio_parameters={quality['missing_ratio_parameters']}")
     log_line("INFO", f"heading_parameters={quality['heading_parameters']}")
     log_line("INFO", f"direct_motion_smoothing_enabled={quality['direct_motion_smoothing']['enabled']}")
+    log_line("INFO", f"acceleration_from_smoothed_velocity_enabled={quality['direct_motion_smoothing']['acceleration_from_smoothed_velocity_enabled']}")
+    log_line("INFO", f"light_acceleration_smoothing_enabled={quality['direct_motion_smoothing']['light_acceleration_smoothing_enabled']}")
+    log_line("INFO", f"large_independent_acceleration_smoothing_enabled={quality['direct_motion_smoothing']['large_independent_acceleration_smoothing_enabled']}")
+    log_line("INFO", f"lon_lat_independent_smoothing_enabled={quality['direct_motion_smoothing']['lon_lat_independent_smoothing_enabled']}")
     log_line("INFO", f"velocity_smooth_window_by_class={quality['direct_motion_smoothing']['velocity_smooth_window_by_class']}")
-    log_line("INFO", f"acceleration_smooth_window_by_class={quality['direct_motion_smoothing']['acceleration_smooth_window_by_class']}")
+    log_line("INFO", f"acceleration_light_smooth_window_by_class={quality['direct_motion_smoothing']['acceleration_light_smooth_window_by_class']}")
     log_line("INFO", f"heading_direct_smooth_window_by_class={quality['direct_motion_smoothing']['heading_direct_smooth_window_by_class']}")
     log_line("INFO", f"direct_motion_actual_windows_by_class={quality['direct_motion_smoothing']['actual_windows_by_class']}")
     log_line("INFO", f"direct_motion_too_short_or_unsmoothed_track_count={quality['direct_motion_smoothing']['too_short_or_unsmoothed_track_count']}")
     log_line("INFO", f"direct_motion_shrunk_window_track_count={quality['direct_motion_smoothing']['shrunk_window_track_count']}")
     log_line("INFO", f"direct_motion_field_delta_summary={quality['direct_motion_smoothing']['field_delta_summary']}")
+    log_line("INFO", f"acceleration_consistency={quality['acceleration_consistency']}")
     log_line("INFO", f"short_track_filter_parameters={quality['short_track_filter_parameters']}")
     log_line("INFO", f"raw_track_count={quality['missing_ratio_summary']['raw_track_count']}")
     log_line("INFO", f"kept_track_count={quality['missing_ratio_summary']['kept_track_count']}")

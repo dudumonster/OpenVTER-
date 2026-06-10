@@ -1,6 +1,6 @@
 # OpenVTER 项目环境说明
 
-当前项目已创建独立 conda 环境：
+当前项目使用独立 conda 环境：
 
 ```text
 OpenVTER
@@ -12,21 +12,18 @@ OpenVTER
 D:\Software\anaconda\envs\OpenVTER
 ```
 
-## 为什么使用 Python 3.7
+## 当前环境版本
 
-当前本机 Anaconda 是 32 位版本：
+项目根目录提供了环境文件：
 
 ```text
-platform: win-32
-Python: 32 bit
+environment_OpenVTER.yml
 ```
 
-直接创建较新的 Python 3.8/3.9 环境时，conda 解析依赖会出现内存不足。因此当前 `OpenVTER` 环境使用 Python 3.7，并安装与当前机器兼容、且已经验证可运行转换模块的依赖版本。
-
-## 已安装核心依赖
+当前环境文件内容对应：
 
 ```text
-python 3.7.13
+python 3.7
 numpy 1.15.1
 scipy 1.1.0
 pandas 0.23.4
@@ -34,27 +31,39 @@ Pillow 5.2.0
 PyYAML 3.13
 ```
 
-这些依赖已经验证可以：
+这些依赖已经覆盖当前转换与可视化所需功能：
 
 ```text
 1. 导入 Visualization/app/converter.py
 2. 读取 det_bbox_result_*.pkl
-3. 使用 scipy 的 Savitzky-Golay 平滑和 PCHIP 插值函数
+3. 使用 numpy 处理轨迹矩阵
+4. 使用 scipy 的 Savitzky-Golay 平滑和 PCHIP 插值
+5. 使用 Pillow 读取背景图尺寸
 ```
 
-## 使用方法
+注意：`Visualization/app/requirements.txt` 是较新 Python 环境可用的 pip 依赖范围；当前这台机器推荐优先使用 `environment_OpenVTER.yml` 中已经验证过的 conda 环境。
 
-每次做当前项目相关操作前，先打开 Anaconda Prompt 或 PowerShell，然后执行：
+## 启用环境
+
+PowerShell：
 
 ```powershell
 conda activate OpenVTER
-cd /d D:\OpenVTER-
+Set-Location "D:\OpenVTER-"
 ```
 
-如果 PowerShell 中 `conda activate` 不可用，可以先运行：
+如果 PowerShell 中 `conda activate` 不可用，可以运行：
 
 ```powershell
-D:\Software\anaconda\Scripts\activate OpenVTER
+& "D:\Software\anaconda\Scripts\activate" OpenVTER
+Set-Location "D:\OpenVTER-"
+```
+
+Anaconda Prompt 或 cmd：
+
+```cmd
+conda activate OpenVTER
+cd /d D:\OpenVTER-
 ```
 
 ## 数据集转换
@@ -65,20 +74,22 @@ D:\Software\anaconda\Scripts\activate OpenVTER
 python "Visualization\app\converter.py" --force
 ```
 
-只转换某个数据集：
+只转换某一个数据集：
 
 ```powershell
-1 python "Visualization\app\converter.py" --datasets cao_qiao_001 --force
-python "Visualization\app\converter.py" --datasets qian_qi_neng_yuan_020 --force
-2 python "Visualization\app\converter.py" --datasets cao_qiao_001 --force > "logs\cao_qiao_001.log" 2>&1
+python "Visualization\app\converter.py" --datasets cao_qiao_001 --force
+```
 
-2 python "Visualization\app\converter.py" --datasets qian_qi_neng_yuan_020 --force > "logs\qian_qi_neng_yuan_020.log" 2>&1
+只转换多个指定数据集：
 
-3 python "Visualization\app\converter.py" --datasets yin_hai_1_016 --force > "logs\yin_hai_1_016.log" 2>&1
+```powershell
+python "Visualization\app\converter.py" --datasets cao_qiao_001 qian_qi_neng_yuan_020 yin_hai_1_016 ban_xian_shan_008 --force
+```
 
-4 python "Visualization\app\converter.py" --datasets ban_xian_shan_008 --force > "logs\ban_xian_shan_008.log" 2>&1
+把控制台输出同时保存到日志文件：
 
-
+```powershell
+python "Visualization\app\converter.py" --datasets cao_qiao_001 --force *> "Visualization\logs\cao_qiao_001_console.log"
 ```
 
 检查 pkl 结构：
@@ -87,27 +98,53 @@ python "Visualization\app\converter.py" --datasets qian_qi_neng_yuan_020 --force
 python "Visualization\app\converter.py" --inspect "Visualization\Initial results\cao_qiao_001\det_bbox_result_cao_qiao_001.pkl"
 ```
 
+转换程序自己的总日志写入：
+
+```text
+Visualization/logs/dataset_conversion.log
+```
+
+转换会同时生成：
+
+```text
+Visualization/Adjusted results/<folderName>/full/
+Visualization/Adjusted results/<folderName>/moving_filtered/
+Visualization/Final Data/<folderName>/
+```
+
 ## 启动可视化工具
 
 ```powershell
 python "Visualization\app\server.py" --host 127.0.0.1 --port 8000
 ```
 
-然后浏览器打开：
+然后在浏览器打开：
 
 ```text
 http://127.0.0.1:8000
 ```
 
-## 复现环境
-
-项目根目录提供了环境配置文件：
+可视化服务日志写入：
 
 ```text
-environment_OpenVTER.yml
+Visualization/logs/visualization_server.log
 ```
 
-如果以后需要重新创建环境，可以先删除旧环境：
+如果 8000 端口被占用，可以换一个端口：
+
+```powershell
+python "Visualization\app\server.py" --host 127.0.0.1 --port 8001
+```
+
+对应浏览器地址：
+
+```text
+http://127.0.0.1:8001
+```
+
+## 复现环境
+
+如果需要重新创建环境，可以先删除旧环境：
 
 ```powershell
 conda remove -n OpenVTER --all
@@ -119,4 +156,4 @@ conda remove -n OpenVTER --all
 conda env create -f environment_OpenVTER.yml
 ```
 
-注意：当前配置是为本机 32 位 Anaconda 准备的。如果后续更换为 64 位 Miniconda/Anaconda，可以升级到更现代的 Python 和依赖版本。
+当前环境文件是为本机现有 Anaconda 配置准备的。如果后续更换为 64 位 Miniconda/Anaconda，可以再评估是否升级到更新的 Python、numpy、scipy 和 Pillow 版本。

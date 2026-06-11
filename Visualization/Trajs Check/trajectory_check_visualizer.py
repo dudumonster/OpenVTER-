@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import textwrap
 from pathlib import Path
@@ -25,6 +26,13 @@ THRESHOLDS = {
     "max_speed_consistency_error": 0.5,  # m/s
     "max_acc_consistency_error": 1.0,    # m/s^2
     "max_heading_motion_error": 45.0,    # deg
+}
+
+DERIVATIVE_CONSISTENCY = {
+    "velocity_rel_tol": 0.20,
+    "velocity_abs_tol": 0.30,      # m/s
+    "acceleration_rel_tol": 0.20,
+    "acceleration_abs_tol": 0.35,  # m/s^2
 }
 
 REQUIRED_TRACK_COLUMNS = [
@@ -137,6 +145,7 @@ def load_dataset(data_root, folder):
     csv_files = find_csv_files(folder_path)
     tracks_df = pd.read_csv(str(csv_files["tracks"]))
     tracks_meta_df = pd.read_csv(str(csv_files["tracksMeta"]))
+    recording_meta_df = pd.read_csv(str(csv_files["recordingMeta"]))
 
     missing_tracks = [column for column in REQUIRED_TRACK_COLUMNS if column not in tracks_df.columns]
     if missing_tracks:
@@ -153,7 +162,34 @@ def load_dataset(data_root, folder):
     if "numFrames" in tracks_meta_df.columns:
         tracks_meta_df["numFrames"] = pd.to_numeric(tracks_meta_df["numFrames"], errors="coerce")
 
-    return tracks_df, tracks_meta_df
+    return tracks_df, tracks_meta_df, recording_meta_df
+
+
+def _frame_rate(recording_meta_df):
+    try:
+        value = pd.to_numeric(recording_meta_df["frameRate"], errors="coerce").dropna().iloc[0]
+        return float(value)
+    except Exception:
+        return 29.97
+
+
+def load_quality_report(data_root, folder):
+    """Best-effort load of converter quality_report for summary diagnostics."""
+    root = Path(data_root).resolve()
+    candidates = [
+        root.parent / "Adjusted results" / folder / "moving_filtered" / "quality_report.json",
+        root.parent / "Adjusted results" / folder / "full" / "quality_report.json",
+        root.parent.parent / "Adjusted results" / folder / "moving_filtered" / "quality_report.json",
+        root.parent.parent / "Adjusted results" / folder / "full" / "quality_report.json",
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    return json.load(fh)
+            except Exception:
+                return {}
+    return {}
 
 
 def normalize_angle_diff(angle_diff):
@@ -175,6 +211,20 @@ def _safe_max(series):
     return float(values.max())
 
 
+def _safe_p95(series):
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return float("nan")
+    return float(np.percentile(values.values, 95))
+
+
+def _safe_ratio(series):
+    values = pd.Series(series).dropna()
+    if values.empty:
+        return 0.0
+    return float(values.astype(bool).sum()) / float(len(values))
+
+
 def _finite_xy_mask(df):
     return np.isfinite(df["xCenter"].values) & np.isfinite(df["yCenter"].values)
 
@@ -183,7 +233,36 @@ def _series_false(index):
     return pd.Series(False, index=index)
 
 
-def compute_track_kinematic_checks(track_df):
+def _differentiate(values, frames, frame_rate):
+    values = np.asarray(values, dtype=float)
+    frames = np.asarray(frames, dtype=float)
+    n = len(values)
+    out = np.full(n, np.nan, dtype=float)
+    if n == 1:
+        out[0] = 0.0
+        return out
+    for i in range(n):
+        if i == 0:
+            j0, j1 = 0, 1
+        elif i == n - 1:
+            j0, j1 = n - 2, n - 1
+        else:
+            j0, j1 = i - 1, i + 1
+        dt = (frames[j1] - frames[j0]) / float(frame_rate)
+        out[i] = np.nan if abs(dt) < 1e-12 else (values[j1] - values[j0]) / dt
+    return out
+
+
+def _relative_error(error, reference_norm, abs_tol):
+    error = np.asarray(error, dtype=float)
+    reference_norm = np.asarray(reference_norm, dtype=float)
+    out = np.full(len(error), np.nan, dtype=float)
+    mask = np.isfinite(error) & np.isfinite(reference_norm) & (reference_norm >= max(float(abs_tol), 1e-12))
+    out[mask] = error[mask] / reference_norm[mask]
+    return out
+
+
+def compute_track_kinematic_checks(track_df, frame_rate=29.97):
     """Compute derived kinematic fields and abnormal-frame flags for one track."""
     df = track_df.copy()
     df = df.sort_values("frame", kind="mergesort").reset_index(drop=True)
@@ -198,6 +277,36 @@ def compute_track_kinematic_checks(track_df):
     df["acc_xy"] = np.sqrt(df["xAcceleration"] ** 2 + df["yAcceleration"] ** 2)
     df["acc_lonlat"] = np.sqrt(df["lonAcceleration"] ** 2 + df["latAcceleration"] ** 2)
     df["acc_error"] = df["acc_xy"] - df["acc_lonlat"]
+
+    df["vx_from_pos"] = _differentiate(df["xCenter"].values, df["frame"].values, frame_rate)
+    df["vy_from_pos"] = _differentiate(df["yCenter"].values, df["frame"].values, frame_rate)
+    df["velocity_derivative_error"] = np.sqrt((df["xVelocity"] - df["vx_from_pos"]) ** 2 + (df["yVelocity"] - df["vy_from_pos"]) ** 2)
+    df["velocity_derivative_reference_norm"] = np.sqrt(df["vx_from_pos"] ** 2 + df["vy_from_pos"] ** 2)
+    df["velocity_derivative_relative_error"] = _relative_error(
+        df["velocity_derivative_error"].values,
+        df["velocity_derivative_reference_norm"].values,
+        DERIVATIVE_CONSISTENCY["velocity_abs_tol"],
+    )
+    velocity_allowed_error = np.maximum(
+        DERIVATIVE_CONSISTENCY["velocity_abs_tol"],
+        DERIVATIVE_CONSISTENCY["velocity_rel_tol"] * df["velocity_derivative_reference_norm"],
+    )
+    df["velocity_derivative_over_20pct"] = df["velocity_derivative_error"] > velocity_allowed_error
+
+    df["ax_from_vel"] = _differentiate(df["xVelocity"].values, df["frame"].values, frame_rate)
+    df["ay_from_vel"] = _differentiate(df["yVelocity"].values, df["frame"].values, frame_rate)
+    df["acceleration_derivative_error"] = np.sqrt((df["xAcceleration"] - df["ax_from_vel"]) ** 2 + (df["yAcceleration"] - df["ay_from_vel"]) ** 2)
+    df["acceleration_derivative_reference_norm"] = np.sqrt(df["ax_from_vel"] ** 2 + df["ay_from_vel"] ** 2)
+    df["acceleration_derivative_relative_error"] = _relative_error(
+        df["acceleration_derivative_error"].values,
+        df["acceleration_derivative_reference_norm"].values,
+        DERIVATIVE_CONSISTENCY["acceleration_abs_tol"],
+    )
+    acceleration_allowed_error = np.maximum(
+        DERIVATIVE_CONSISTENCY["acceleration_abs_tol"],
+        DERIVATIVE_CONSISTENCY["acceleration_rel_tol"] * df["acceleration_derivative_reference_norm"],
+    )
+    df["acceleration_derivative_over_20pct"] = df["acceleration_derivative_error"] > acceleration_allowed_error
 
     # Heading-compatible convention for this dataset:
     # 0 deg = +Y, 90 deg = +X. Therefore the motion direction must use
@@ -279,6 +388,12 @@ def summarize_track(track_df, track_meta_row):
         "max_abs_speed_error": _safe_max_abs(checked["speed_error"]),
         "max_abs_acc_error": _safe_max_abs(checked["acc_error"]),
         "max_abs_heading_motion_error": _safe_max_abs(checked["angle_error"]),
+        "max_velocity_derivative_error": _safe_max(checked["velocity_derivative_error"]),
+        "p95_velocity_derivative_error": _safe_p95(checked["velocity_derivative_error"]),
+        "velocity_derivative_over_20pct_ratio": _safe_ratio(checked["velocity_derivative_over_20pct"]),
+        "max_acceleration_derivative_error": _safe_max(checked["acceleration_derivative_error"]),
+        "p95_acceleration_derivative_error": _safe_p95(checked["acceleration_derivative_error"]),
+        "acceleration_derivative_over_20pct_ratio": _safe_ratio(checked["acceleration_derivative_over_20pct"]),
         "num_abnormal_frames": num_abnormal,
         "abnormal_ratio": abnormal_ratio,
         "nan_lonVelocity": int(checked["lonVelocity"].isnull().sum()),
@@ -313,6 +428,12 @@ def _print_track_summary(summary):
         "max_abs_speed_error",
         "max_abs_acc_error",
         "max_abs_heading_motion_error",
+        "max_velocity_derivative_error",
+        "p95_velocity_derivative_error",
+        "velocity_derivative_over_20pct_ratio",
+        "max_acceleration_derivative_error",
+        "p95_acceleration_derivative_error",
+        "acceleration_derivative_over_20pct_ratio",
         "num_abnormal_frames",
         "abnormal_ratio",
         "nan_lonVelocity",
@@ -399,6 +520,12 @@ def _summary_text(summary, checked):
         "max_abs_speed_error: %s" % _format_number(summary["max_abs_speed_error"]),
         "max_abs_acc_error: %s" % _format_number(summary["max_abs_acc_error"]),
         "max_abs_heading_motion_error: %s" % _format_number(summary["max_abs_heading_motion_error"]),
+        "max_vel_deriv_error: %s" % _format_number(summary["max_velocity_derivative_error"]),
+        "p95_vel_deriv_error: %s" % _format_number(summary["p95_velocity_derivative_error"]),
+        "vel_deriv_over20_ratio: %s" % _format_number(summary["velocity_derivative_over_20pct_ratio"]),
+        "max_acc_deriv_error: %s" % _format_number(summary["max_acceleration_derivative_error"]),
+        "p95_acc_deriv_error: %s" % _format_number(summary["p95_acceleration_derivative_error"]),
+        "acc_deriv_over20_ratio: %s" % _format_number(summary["acceleration_derivative_over_20pct_ratio"]),
         "num_abnormal_frames: %s" % summary["num_abnormal_frames"],
         "abnormal_ratio: %s" % _format_number(summary["abnormal_ratio"]),
         "NaN lon/lat vel: %s/%s" % (summary["nan_lonVelocity"], summary["nan_latVelocity"]),
@@ -409,9 +536,9 @@ def _summary_text(summary, checked):
     return "\n".join(lines + abnormal_counts)
 
 
-def plot_track_check(track_df, track_meta_row, folder_name):
+def plot_track_check(track_df, track_meta_row, folder_name, frame_rate=29.97):
     """Plot all checks for one track in a single matplotlib figure."""
-    checked = compute_track_kinematic_checks(track_df)
+    checked = compute_track_kinematic_checks(track_df, frame_rate)
     summary = summarize_track(checked, track_meta_row)
     _print_track_summary(summary)
 
@@ -566,7 +693,7 @@ def _sorted_track_ids(tracks_df):
     return sorted(ids.tolist())
 
 
-def interactive_track_loop(tracks_df, tracks_meta_df, folder_name, track_id=None):
+def interactive_track_loop(tracks_df, tracks_meta_df, folder_name, track_id=None, frame_rate=29.97):
     """Show one track or iterate over all tracks in trackId order."""
     if track_id is None:
         track_ids = _sorted_track_ids(tracks_df)
@@ -584,13 +711,13 @@ def interactive_track_loop(tracks_df, tracks_meta_df, folder_name, track_id=None
         print("正在显示 folder=%s, trackId=%s, class=%s, numFrames=%s" % (folder_name, current_track_id, class_name, num_frames))
         if track_id is None:
             print("关闭图窗口后将自动显示下一个 track。")
-        plot_track_check(track_rows, meta_row, folder_name)
+        plot_track_check(track_rows, meta_row, folder_name, frame_rate)
 
 
-def _compute_all_checks(tracks_df):
+def _compute_all_checks(tracks_df, frame_rate=29.97):
     checked_tracks = []
     for _, group in tracks_df.groupby("trackId", sort=True):
-        checked_tracks.append(compute_track_kinematic_checks(group))
+        checked_tracks.append(compute_track_kinematic_checks(group, frame_rate))
     if not checked_tracks:
         return pd.DataFrame()
     return pd.concat(checked_tracks, ignore_index=True)
@@ -636,7 +763,17 @@ def _boxplot_by_class(ax, checked, value_column, title, ylabel):
     ax.set_ylabel(ylabel)
 
 
-def _global_summary_text(checked, folder_name):
+def _quality_terminal_stats(quality_report):
+    quality = quality_report.get("quality", {}) if isinstance(quality_report, dict) else {}
+    terminal = quality.get("terminal_heading_protection", {}) if isinstance(quality, dict) else {}
+    return {
+        "terminal_heading_protected_frame_count": int(terminal.get("protected_frame_count", 0) or 0),
+        "terminal_heading_protected_track_count": int(terminal.get("protected_track_count", 0) or 0),
+    }
+
+
+def _global_summary_text(checked, folder_name, quality_report=None):
+    terminal_stats = _quality_terminal_stats(quality_report or {})
     lines = [
         "folder: %s" % folder_name,
         "numTracks: %s" % len(_sorted_track_ids(checked)) if not checked.empty else "numTracks: 0",
@@ -646,6 +783,14 @@ def _global_summary_text(checked, folder_name):
         "max_abs_speed_error: %s" % _format_number(_safe_max_abs(checked["speed_error"])),
         "max_abs_acc_error: %s" % _format_number(_safe_max_abs(checked["acc_error"])),
         "max_abs_heading_motion_error: %s" % _format_number(_safe_max_abs(checked["angle_error"])),
+        "max_velocity_derivative_error: %s" % _format_number(_safe_max(checked["velocity_derivative_error"])),
+        "p95_velocity_derivative_error: %s" % _format_number(_safe_p95(checked["velocity_derivative_error"])),
+        "velocity_deriv_over20_ratio: %s" % _format_number(_safe_ratio(checked["velocity_derivative_over_20pct"])),
+        "max_acceleration_derivative_error: %s" % _format_number(_safe_max(checked["acceleration_derivative_error"])),
+        "p95_acceleration_derivative_error: %s" % _format_number(_safe_p95(checked["acceleration_derivative_error"])),
+        "acceleration_deriv_over20_ratio: %s" % _format_number(_safe_ratio(checked["acceleration_derivative_over_20pct"])),
+        "terminal_heading_protected_frames: %s" % terminal_stats["terminal_heading_protected_frame_count"],
+        "terminal_heading_protected_tracks: %s" % terminal_stats["terminal_heading_protected_track_count"],
         "num_abnormal_rows: %s" % int(checked["abnormal_frame"].sum()),
         "abnormal_ratio: %s" % _format_number(float(checked["abnormal_frame"].sum()) / float(len(checked)) if len(checked) else 0.0),
         "",
@@ -655,9 +800,9 @@ def _global_summary_text(checked, folder_name):
     return "\n".join(lines)
 
 
-def plot_summary(tracks_df, tracks_meta_df, folder_name):
+def plot_summary(tracks_df, tracks_meta_df, folder_name, frame_rate=29.97, quality_report=None):
     """Plot folder-level summary checks in one matplotlib figure."""
-    checked = _add_class_column(_compute_all_checks(tracks_df), tracks_meta_df)
+    checked = _add_class_column(_compute_all_checks(tracks_df, frame_rate), tracks_meta_df)
     if checked.empty:
         print("folder=%s 中没有可统计的轨迹数据。" % folder_name)
         return
@@ -697,10 +842,10 @@ def plot_summary(tracks_df, tracks_meta_df, folder_name):
     _boxplot_by_class(axes[10], checked, "acc_xy", "acc_xy by class", "acc_xy (m/s^2)")
 
     axes[11].axis("off")
-    _draw_summary_columns(axes[11], _global_summary_text(checked, folder_name))
+    _draw_summary_columns(axes[11], _global_summary_text(checked, folder_name, quality_report))
     axes[11].set_title("Global abnormal summary")
 
-    print(_global_summary_text(checked, folder_name))
+    print(_global_summary_text(checked, folder_name, quality_report))
     _apply_axis_spacing(axes)
     fig.subplots_adjust(**FIGURE_ADJUST)
     plt.show()
@@ -732,11 +877,13 @@ def main():
         _list_available_folders(args.data_root)
         return
 
-    tracks_df, tracks_meta_df = load_dataset(args.data_root, args.folder)
+    tracks_df, tracks_meta_df, recording_meta_df = load_dataset(args.data_root, args.folder)
+    frame_rate = _frame_rate(recording_meta_df)
+    quality_report = load_quality_report(args.data_root, args.folder)
     if args.summary:
-        plot_summary(tracks_df, tracks_meta_df, args.folder)
+        plot_summary(tracks_df, tracks_meta_df, args.folder, frame_rate, quality_report)
     else:
-        interactive_track_loop(tracks_df, tracks_meta_df, args.folder, args.track_id)
+        interactive_track_loop(tracks_df, tracks_meta_df, args.folder, args.track_id, frame_rate)
 
 
 if __name__ == "__main__":

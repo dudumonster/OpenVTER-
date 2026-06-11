@@ -84,32 +84,32 @@ HEADING_SMOOTH_WINDOW = 5
 ENABLE_DIRECT_MOTION_FIELD_SMOOTHING = True
 MOTION_SMOOTH_METHOD = "savgol"
 VELOCITY_SMOOTH_WINDOW_BY_CLASS = {
-    "car": 91,
-    "van": 91,
-    "truck": 91,
-    "bus": 91,
-    "freight_car": 91,
-    "motor": 61,
-    "tricycle": 61,
-    "awning-tricycle": 61,
-    "bicycle": 61,
-    "pedestrian": 31,
-    "people": 31,
-    "default": 61,
+    "car": 45,
+    "van": 45,
+    "truck": 45,
+    "bus": 45,
+    "freight_car": 45,
+    "motor": 31,
+    "tricycle": 31,
+    "awning-tricycle": 31,
+    "bicycle": 31,
+    "pedestrian": 21,
+    "people": 21,
+    "default": 31,
 }
 ACCELERATION_SMOOTH_WINDOW_BY_CLASS = {
-    "car": 121,
-    "van": 121,
-    "truck": 121,
-    "bus": 121,
-    "freight_car": 121,
-    "motor": 75,
-    "tricycle": 75,
-    "awning-tricycle": 75,
-    "bicycle": 75,
-    "pedestrian": 45,
-    "people": 45,
-    "default": 75,
+    "car": 21,
+    "van": 21,
+    "truck": 21,
+    "bus": 21,
+    "freight_car": 21,
+    "motor": 15,
+    "tricycle": 15,
+    "awning-tricycle": 15,
+    "bicycle": 15,
+    "pedestrian": 11,
+    "people": 11,
+    "default": 15,
 }
 HEADING_DIRECT_SMOOTH_WINDOW_BY_CLASS = {
     "car": 75,
@@ -126,12 +126,66 @@ HEADING_DIRECT_SMOOTH_WINDOW_BY_CLASS = {
     "default": 45,
 }
 MOTION_SMOOTH_POLYORDER = 3
-ACCELERATION_EXTRA_SMOOTH_PASSES = 2
+ACCELERATION_EXTRA_SMOOTH_PASSES = 1
 VELOCITY_EXTRA_SMOOTH_PASSES = 1
 HEADING_EXTRA_SMOOTH_PASSES = 1
 MIN_DISPLACEMENT_FOR_HEADING = 0.05
 LOW_SPEED_THRESHOLD = 0.2
 MAX_HEADING_JUMP_DEG = 45.0
+ENABLE_BOUNDED_MOTION_SMOOTHING = True
+BOUNDED_SMOOTHING_REL_TOL = 0.20
+BOUNDED_VELOCITY_ABS_TOL_BY_CLASS = {
+    "car": 0.30,
+    "van": 0.30,
+    "truck": 0.30,
+    "bus": 0.30,
+    "freight_car": 0.30,
+    "motor": 0.20,
+    "tricycle": 0.20,
+    "awning-tricycle": 0.20,
+    "bicycle": 0.20,
+    "pedestrian": 0.12,
+    "people": 0.12,
+    "default": 0.20,
+}
+BOUNDED_ACCELERATION_ABS_TOL_BY_CLASS = {
+    "car": 0.35,
+    "van": 0.35,
+    "truck": 0.35,
+    "bus": 0.35,
+    "freight_car": 0.35,
+    "motor": 0.25,
+    "tricycle": 0.25,
+    "awning-tricycle": 0.25,
+    "bicycle": 0.25,
+    "pedestrian": 0.18,
+    "people": 0.18,
+    "default": 0.25,
+}
+ENABLE_TERMINAL_HEADING_PROTECTION = True
+TERMINAL_HEADING_LOOKBACK_FRAMES = 80
+TERMINAL_HEADING_STABLE_WINDOW = 35
+TERMINAL_HEADING_SEARCH_WINDOW = 140
+TERMINAL_HEADING_MIN_BAD_SIGNALS = 2
+TERMINAL_HEADING_DEVIATION_DEG = 45.0
+TERMINAL_HEADING_SOFT_DEVIATION_DEG = 20.0
+TERMINAL_HEADING_SPEED_THRESHOLD_BY_CLASS = {
+    "car": 1.0,
+    "van": 1.0,
+    "truck": 1.0,
+    "bus": 1.0,
+    "freight_car": 1.0,
+    "motor": 0.7,
+    "tricycle": 0.7,
+    "awning-tricycle": 0.7,
+    "bicycle": 0.6,
+    "pedestrian": 0.35,
+    "people": 0.35,
+    "default": 0.7,
+}
+TERMINAL_BOUNDARY_MARGIN_PX = 35.0
+TERMINAL_CONFIDENCE_LOW = 0.45
+TERMINAL_SPEED_DROP_RATIO = 0.55
 SHORT_TRACK_MIN_FRAMES = {
     "pedestrian": 90,
     "people": 90,
@@ -1505,6 +1559,277 @@ def _direct_smooth_field(
     return smoothed
 
 
+def _class_value(config: Dict[str, float], final_class: str) -> float:
+    return float(config.get(final_class, config["default"]))
+
+
+def _circular_mean_degrees(values: Iterable[float]) -> Optional[float]:
+    valid = [float(value) for value in values if _is_valid_heading(value)]
+    if not valid:
+        return None
+    radians = np.radians(np.asarray(valid, dtype=float))
+    sin_mean = float(np.mean(np.sin(radians)))
+    cos_mean = float(np.mean(np.cos(radians)))
+    if abs(sin_mean) < 1e-12 and abs(cos_mean) < 1e-12:
+        return None
+    return math.degrees(math.atan2(sin_mean, cos_mean)) % 360.0
+
+
+def _record_bounded_motion_smoothing(
+    quality: Dict[str, Any],
+    final_class: str,
+    label: str,
+    quantity: str,
+    total_frames: int,
+    clipped_frames: int,
+    max_candidate_error: float,
+    max_final_error: float,
+) -> None:
+    stats = quality["bounded_motion_smoothing"]
+    quantity_stats = stats[quantity]
+    quantity_stats["total_frames"] += int(total_frames)
+    quantity_stats["clipped_frames"] += int(clipped_frames)
+    if clipped_frames:
+        quantity_stats["clipped_track_labels"].add(label)
+        quantity_stats["clipped_track_count"] = len(quantity_stats["clipped_track_labels"])
+        quantity_stats["clipped_tracks"].append(
+            {
+                "track": label,
+                "class": final_class,
+                "clipped_frames": int(clipped_frames),
+                "total_frames": int(total_frames),
+                "clipped_ratio": float(clipped_frames) / float(total_frames) if total_frames else 0.0,
+                "max_candidate_vector_error": float(max_candidate_error),
+                "max_final_vector_error": float(max_final_error),
+            }
+        )
+    quantity_stats["max_candidate_vector_error"] = max(float(quantity_stats.get("max_candidate_vector_error", 0.0)), float(max_candidate_error))
+    quantity_stats["max_final_vector_error"] = max(float(quantity_stats.get("max_final_vector_error", 0.0)), float(max_final_error))
+    quantity_stats["clipped_ratio"] = (
+        float(quantity_stats["clipped_frames"]) / float(quantity_stats["total_frames"])
+        if quantity_stats["total_frames"]
+        else 0.0
+    )
+
+
+def _bounded_vector_smooth(
+    x_ref: List[float],
+    y_ref: List[float],
+    final_class: str,
+    label: str,
+    quantity: str,
+    window_config: Dict[str, int],
+    passes: int,
+    abs_tol_config: Dict[str, float],
+    quality: Dict[str, Any],
+) -> Tuple[List[float], List[float]]:
+    if not ENABLE_DIRECT_MOTION_FIELD_SMOOTHING:
+        return [float(v) for v in x_ref], [float(v) for v in y_ref]
+
+    requested_window = _motion_window_for_class(window_config, final_class)
+    x_candidate = smooth_numeric_series(x_ref, requested_window, MOTION_SMOOTH_POLYORDER, passes)
+    y_candidate = smooth_numeric_series(y_ref, requested_window, MOTION_SMOOTH_POLYORDER, passes)
+    abs_tol = _class_value(abs_tol_config, final_class)
+    rel_tol = float(BOUNDED_SMOOTHING_REL_TOL)
+
+    x_out: List[float] = []
+    y_out: List[float] = []
+    clipped = 0
+    max_candidate_error = 0.0
+    max_final_error = 0.0
+    for xr, yr, xc, yc in zip(x_ref, y_ref, x_candidate, y_candidate):
+        xr_f = float(xr)
+        yr_f = float(yr)
+        xc_f = float(xc)
+        yc_f = float(yc)
+        if not (_finite(xr_f) and _finite(yr_f) and _finite(xc_f) and _finite(yc_f)):
+            x_out.append(xr_f)
+            y_out.append(yr_f)
+            continue
+        err_x = xc_f - xr_f
+        err_y = yc_f - yr_f
+        err_norm = math.hypot(err_x, err_y)
+        ref_norm = math.hypot(xr_f, yr_f)
+        limit = max(abs_tol, rel_tol * ref_norm)
+        max_candidate_error = max(max_candidate_error, err_norm)
+        if err_norm > limit and err_norm > 1e-12:
+            scale = limit / err_norm
+            xo = xr_f + err_x * scale
+            yo = yr_f + err_y * scale
+            clipped += 1
+        else:
+            xo = xc_f
+            yo = yc_f
+        max_final_error = max(max_final_error, math.hypot(xo - xr_f, yo - yr_f))
+        x_out.append(float(xo))
+        y_out.append(float(yo))
+
+    _record_direct_motion_smoothing(quality, final_class, label, f"{quantity}_x", requested_window, _adapt_direct_smooth_window(len(x_ref), requested_window, MOTION_SMOOTH_POLYORDER), x_ref, x_out)
+    _record_direct_motion_smoothing(quality, final_class, label, f"{quantity}_y", requested_window, _adapt_direct_smooth_window(len(y_ref), requested_window, MOTION_SMOOTH_POLYORDER), y_ref, y_out)
+    _record_bounded_motion_smoothing(quality, final_class, label, quantity, len(x_ref), clipped, max_candidate_error, max_final_error)
+    return x_out, y_out
+
+
+def _row_near_image_boundary(row: Dict[str, Any], video_size: Optional[Dict[str, float]]) -> bool:
+    width = _safe_float((video_size or {}).get("width"))
+    height = _safe_float((video_size or {}).get("height"))
+    if width is None and height is None:
+        return False
+    xs = [_safe_float(row.get(key)) for key in ("q1_x", "q2_x", "q3_x", "q4_x")]
+    ys = [_safe_float(row.get(key)) for key in ("q1_y", "q2_y", "q3_y", "q4_y")]
+    xs = [value for value in xs if value is not None]
+    ys = [value for value in ys if value is not None]
+    margin = float(TERMINAL_BOUNDARY_MARGIN_PX)
+    if width is not None and xs:
+        if min(xs) <= margin or max(xs) >= width - margin:
+            return True
+    if height is not None and ys:
+        if min(ys) <= margin or max(ys) >= height - margin:
+            return True
+    return False
+
+
+def _recent_stable_heading(
+    rows: List[Dict[str, Any]],
+    motion_headings: List[float],
+    speeds: List[float],
+    final_class: str,
+    index: int,
+    video_size: Optional[Dict[str, float]],
+) -> Tuple[Optional[float], float]:
+    min_speed = _class_value(TERMINAL_HEADING_SPEED_THRESHOLD_BY_CLASS, final_class)
+    start = max(0, index - int(TERMINAL_HEADING_SEARCH_WINDOW))
+    candidates: List[Tuple[int, float]] = []
+    candidate_speeds: List[float] = []
+    for j in range(index - 1, start - 1, -1):
+        if j < 0 or j >= len(rows):
+            continue
+        if bool(rows[j].get("is_interpolated", False)):
+            continue
+        if speeds[j] < min_speed:
+            continue
+        if _row_near_image_boundary(rows[j], video_size):
+            continue
+        if not _is_valid_heading(motion_headings[j]):
+            continue
+        candidates.append((j, float(motion_headings[j])))
+        candidate_speeds.append(float(speeds[j]))
+        if len(candidates) >= int(TERMINAL_HEADING_STABLE_WINDOW):
+            break
+    if not candidates:
+        return None, 0.0
+    initial = _circular_mean_degrees([heading for _, heading in candidates])
+    if initial is None:
+        return None, float(np.median(candidate_speeds)) if candidate_speeds else 0.0
+    filtered = [heading for _, heading in candidates if (_angle_diff_deg(heading, initial) or 0.0) <= 35.0]
+    stable = _circular_mean_degrees(filtered or [heading for _, heading in candidates])
+    median_speed = float(np.median(candidate_speeds)) if candidate_speeds else 0.0
+    return stable, median_speed
+
+
+def _terminal_bad_signal_count(
+    rows: List[Dict[str, Any]],
+    headings: List[float],
+    motion_headings: List[float],
+    speeds: List[float],
+    final_class: str,
+    index: int,
+    stable_heading: Optional[float],
+    stable_speed: float,
+    video_size: Optional[Dict[str, float]],
+) -> Tuple[int, Dict[str, bool]]:
+    min_speed = _class_value(TERMINAL_HEADING_SPEED_THRESHOLD_BY_CLASS, final_class)
+    near_boundary = _row_near_image_boundary(rows[index], video_size)
+    start = max(0, index - 2)
+    end = min(len(rows), index + 3)
+    interpolation_near = any(bool(rows[j].get("is_interpolated", False)) for j in range(start, end))
+    confidence = _safe_float(rows[index].get("confidence"))
+    confidence_low = confidence is None or confidence < float(TERMINAL_CONFIDENCE_LOW)
+    low_speed = speeds[index] < min_speed
+    speed_drop = stable_speed > min_speed and speeds[index] < float(TERMINAL_SPEED_DROP_RATIO) * stable_speed
+    heading_deviation = stable_heading is not None and (_angle_diff_deg(headings[index], stable_heading) or 0.0) > float(TERMINAL_HEADING_DEVIATION_DEG)
+    motion_deviation = stable_heading is not None and (_angle_diff_deg(motion_headings[index], stable_heading) or 0.0) > float(TERMINAL_HEADING_DEVIATION_DEG)
+    class_changed = rows[index].get("raw_class") not in (None, "", final_class) and not bool(rows[index].get("is_interpolated", False))
+    signals = {
+        "near_boundary": near_boundary,
+        "interpolation_near": interpolation_near,
+        "confidence_low_or_missing": confidence_low,
+        "low_speed": low_speed,
+        "speed_drop": speed_drop,
+        "heading_deviation": heading_deviation,
+        "motion_deviation": motion_deviation,
+        "class_changed": bool(class_changed),
+    }
+    return sum(1 for value in signals.values() if value), signals
+
+
+def _record_terminal_heading_protection(
+    quality: Dict[str, Any],
+    label: str,
+    final_class: str,
+    protected_indices: List[int],
+    rows: List[Dict[str, Any]],
+    stable_heading: Optional[float],
+) -> None:
+    if not protected_indices:
+        return
+    stats = quality["terminal_heading_protection"]
+    stats["protected_track_labels"].add(label)
+    stats["protected_track_count"] = len(stats["protected_track_labels"])
+    stats["protected_frame_count"] += len(protected_indices)
+    stats["protected_tracks"].append(
+        {
+            "track": label,
+            "class": final_class,
+            "protected_frame_count": len(protected_indices),
+            "first_frame": int(rows[min(protected_indices)]["frame"]),
+            "last_frame": int(rows[max(protected_indices)]["frame"]),
+            "stable_heading": stable_heading,
+        }
+    )
+
+
+def _apply_terminal_heading_protection(
+    rows: List[Dict[str, Any]],
+    headings: List[float],
+    x_vel: List[float],
+    y_vel: List[float],
+    final_class: str,
+    label: str,
+    quality: Dict[str, Any],
+    video_size: Optional[Dict[str, float]],
+) -> List[float]:
+    if not ENABLE_TERMINAL_HEADING_PROTECTION or not rows or not headings:
+        return headings
+    n = len(rows)
+    terminal_start = max(0, n - int(TERMINAL_HEADING_LOOKBACK_FRAMES))
+    speeds = [math.hypot(float(vx), float(vy)) for vx, vy in zip(x_vel, y_vel)]
+    motion_headings = [math.degrees(math.atan2(float(vx), float(vy))) % 360.0 if math.hypot(float(vx), float(vy)) > 1e-9 else float(headings[i]) for i, (vx, vy) in enumerate(zip(x_vel, y_vel))]
+    out = [float(value) % 360.0 for value in headings]
+    protected: List[int] = []
+    last_stable_heading: Optional[float] = None
+    for i in range(terminal_start, n):
+        stable_heading, stable_speed = _recent_stable_heading(rows, motion_headings, speeds, final_class, i, video_size)
+        if stable_heading is None:
+            continue
+        bad_count, signals = _terminal_bad_signal_count(rows, out, motion_headings, speeds, final_class, i, stable_heading, stable_speed, video_size)
+        soft_heading_deviation = (_angle_diff_deg(out[i], stable_heading) or 0.0) > float(TERMINAL_HEADING_SOFT_DEVIATION_DEG)
+        soft_motion_deviation = (_angle_diff_deg(motion_headings[i], stable_heading) or 0.0) > float(TERMINAL_HEADING_SOFT_DEVIATION_DEG)
+        strong_terminal_quality_problem = signals["near_boundary"] and (signals["low_speed"] or signals["speed_drop"] or signals["confidence_low_or_missing"] or signals["interpolation_near"])
+        has_direction_problem = (
+            signals["heading_deviation"]
+            or signals["motion_deviation"]
+            or (strong_terminal_quality_problem and (soft_heading_deviation or soft_motion_deviation))
+        )
+        has_terminal_quality_problem = signals["near_boundary"] or signals["interpolation_near"] or signals["confidence_low_or_missing"] or signals["low_speed"] or signals["speed_drop"]
+        if bad_count >= int(TERMINAL_HEADING_MIN_BAD_SIGNALS) and has_direction_problem and has_terminal_quality_problem:
+            out[i] = float(stable_heading)
+            protected.append(i)
+            last_stable_heading = stable_heading
+    _record_terminal_heading_protection(quality, label, final_class, protected, rows, last_stable_heading)
+    return out
+
+
 def _valid_dimensions(rows: List[Dict[str, Any]], quality: Dict[str, Any]) -> Tuple[List[float], List[float]]:
     widths = [float(row["raw_width"]) for row in rows if _finite(row.get("raw_width")) and row["raw_width"] > 0]
     lengths = [float(row["raw_length"]) for row in rows if _finite(row.get("raw_length")) and row["raw_length"] > 0]
@@ -1650,6 +1975,7 @@ def smooth_track_and_refine_motion(
     logger: logging.Logger,
     quality: Dict[str, Any],
     label: str,
+    video_size: Optional[Dict[str, float]] = None,
 ) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float]]:
     """
     Smooth one track's center coordinates, recompute velocity/acceleration, and
@@ -1660,50 +1986,36 @@ def smooth_track_and_refine_motion(
     xs = _smooth_series([float(row["xCenter_raw"]) for row in rows], quality, label, smooth_window)
     ys = _smooth_series([float(row["yCenter_raw"]) for row in rows], quality, label, smooth_window)
     frames = [int(row["frame"]) for row in rows]
-    x_vel = _differentiate(xs, frames, frame_rate)
-    y_vel = _differentiate(ys, frames, frame_rate)
-    x_acc = _differentiate(x_vel, frames, frame_rate)
-    y_acc = _differentiate(y_vel, frames, frame_rate)
+    x_vel_ref = _differentiate(xs, frames, frame_rate)
+    y_vel_ref = _differentiate(ys, frames, frame_rate)
+    x_vel, y_vel = _bounded_vector_smooth(
+        x_vel_ref,
+        y_vel_ref,
+        final_class,
+        label,
+        "velocity",
+        VELOCITY_SMOOTH_WINDOW_BY_CLASS,
+        VELOCITY_EXTRA_SMOOTH_PASSES,
+        BOUNDED_VELOCITY_ABS_TOL_BY_CLASS,
+        quality,
+    )
+    x_acc_ref = _differentiate(x_vel, frames, frame_rate)
+    y_acc_ref = _differentiate(y_vel, frames, frame_rate)
+    x_acc, y_acc = _bounded_vector_smooth(
+        x_acc_ref,
+        y_acc_ref,
+        final_class,
+        label,
+        "acceleration",
+        ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
+        ACCELERATION_EXTRA_SMOOTH_PASSES,
+        BOUNDED_ACCELERATION_ABS_TOL_BY_CLASS,
+        quality,
+    )
     motion_headings, stable_motion_headings = _compute_motion_headings(xs, ys, frames, frame_rate)
     speeds = [math.hypot(vx, vy) for vx, vy in zip(x_vel, y_vel)]
     headings = refine_heading_for_visualization(rows, motion_headings, stable_motion_headings, speeds, logger, label)
     if ENABLE_DIRECT_MOTION_FIELD_SMOOTHING:
-        x_vel = _direct_smooth_field(
-            x_vel,
-            final_class,
-            label,
-            "xVelocity",
-            VELOCITY_SMOOTH_WINDOW_BY_CLASS,
-            VELOCITY_EXTRA_SMOOTH_PASSES,
-            quality,
-        )
-        y_vel = _direct_smooth_field(
-            y_vel,
-            final_class,
-            label,
-            "yVelocity",
-            VELOCITY_SMOOTH_WINDOW_BY_CLASS,
-            VELOCITY_EXTRA_SMOOTH_PASSES,
-            quality,
-        )
-        x_acc = _direct_smooth_field(
-            x_acc,
-            final_class,
-            label,
-            "xAcceleration",
-            ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
-            ACCELERATION_EXTRA_SMOOTH_PASSES,
-            quality,
-        )
-        y_acc = _direct_smooth_field(
-            y_acc,
-            final_class,
-            label,
-            "yAcceleration",
-            ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
-            ACCELERATION_EXTRA_SMOOTH_PASSES,
-            quality,
-        )
         headings = _direct_smooth_field(
             headings,
             final_class,
@@ -1714,6 +2026,7 @@ def smooth_track_and_refine_motion(
             quality,
             angle=True,
         )
+    headings = _apply_terminal_heading_protection(rows, headings, x_vel, y_vel, final_class, label, quality, video_size)
     return xs, ys, headings, x_vel, y_vel, x_acc, y_acc
 
 
@@ -1752,7 +2065,13 @@ def _estimate_ortho_px_to_meter(rows: List[Dict[str, Any]], logger: logging.Logg
     return float(np.median(arr)) if arr.size else None
 
 
-def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float, logger: logging.Logger, quality: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def _build_final_tracks(
+    fragments: List[List[Dict[str, Any]]],
+    frame_rate: float,
+    logger: logging.Logger,
+    quality: Dict[str, Any],
+    video_size: Optional[Dict[str, float]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     prepared = []
     for idx, fragment in enumerate(fragments, start=1):
         fragment.sort(key=lambda item: int(item["frame"]))
@@ -1865,6 +2184,7 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
             logger,
             quality,
             f"trackId={track_id}",
+            video_size,
         )
 
         lon_vel: List[float] = []
@@ -1877,45 +2197,6 @@ def _build_final_tracks(fragments: List[List[Dict[str, Any]]], frame_rate: float
             lat_vel.append(vx * (-math.cos(theta)) + vy * math.sin(theta))
             lon_acc.append(ax * math.sin(theta) + ay * math.cos(theta))
             lat_acc.append(ax * (-math.cos(theta)) + ay * math.sin(theta))
-
-        if ENABLE_DIRECT_MOTION_FIELD_SMOOTHING:
-            label = f"trackId={track_id}"
-            lon_vel = _direct_smooth_field(
-                lon_vel,
-                final_class,
-                label,
-                "lonVelocity",
-                VELOCITY_SMOOTH_WINDOW_BY_CLASS,
-                VELOCITY_EXTRA_SMOOTH_PASSES,
-                quality,
-            )
-            lat_vel = _direct_smooth_field(
-                lat_vel,
-                final_class,
-                label,
-                "latVelocity",
-                VELOCITY_SMOOTH_WINDOW_BY_CLASS,
-                VELOCITY_EXTRA_SMOOTH_PASSES,
-                quality,
-            )
-            lon_acc = _direct_smooth_field(
-                lon_acc,
-                final_class,
-                label,
-                "lonAcceleration",
-                ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
-                ACCELERATION_EXTRA_SMOOTH_PASSES,
-                quality,
-            )
-            lat_acc = _direct_smooth_field(
-                lat_acc,
-                final_class,
-                label,
-                "latAcceleration",
-                ACCELERATION_SMOOTH_WINDOW_BY_CLASS,
-                ACCELERATION_EXTRA_SMOOTH_PASSES,
-                quality,
-            )
 
         for lifetime, (row, x, y, heading, vx, vy, ax, ay, lon_v, lat_v, lon_a, lat_a) in enumerate(
             zip(rows, xs, ys, headings, x_vel, y_vel, x_acc, y_acc, lon_vel, lat_vel, lon_acc, lat_acc),
@@ -2053,6 +2334,49 @@ def _quality_template() -> Dict[str, Any]:
             "shrunk_window_track_labels": set(),
             "shrunk_window_tracks": [],
             "field_delta_summary": {},
+        },
+        "bounded_motion_smoothing": {
+            "enabled": ENABLE_BOUNDED_MOTION_SMOOTHING,
+            "relative_tolerance": BOUNDED_SMOOTHING_REL_TOL,
+            "velocity_abs_tol_by_class": dict(BOUNDED_VELOCITY_ABS_TOL_BY_CLASS),
+            "acceleration_abs_tol_by_class": dict(BOUNDED_ACCELERATION_ABS_TOL_BY_CLASS),
+            "velocity": {
+                "total_frames": 0,
+                "clipped_frames": 0,
+                "clipped_ratio": 0.0,
+                "clipped_track_count": 0,
+                "clipped_track_labels": set(),
+                "clipped_tracks": [],
+                "max_candidate_vector_error": 0.0,
+                "max_final_vector_error": 0.0,
+            },
+            "acceleration": {
+                "total_frames": 0,
+                "clipped_frames": 0,
+                "clipped_ratio": 0.0,
+                "clipped_track_count": 0,
+                "clipped_track_labels": set(),
+                "clipped_tracks": [],
+                "max_candidate_vector_error": 0.0,
+                "max_final_vector_error": 0.0,
+            },
+        },
+        "terminal_heading_protection": {
+            "enabled": ENABLE_TERMINAL_HEADING_PROTECTION,
+            "lookback_frames": TERMINAL_HEADING_LOOKBACK_FRAMES,
+            "stable_window": TERMINAL_HEADING_STABLE_WINDOW,
+            "search_window": TERMINAL_HEADING_SEARCH_WINDOW,
+            "min_bad_signals": TERMINAL_HEADING_MIN_BAD_SIGNALS,
+            "deviation_deg": TERMINAL_HEADING_DEVIATION_DEG,
+            "soft_deviation_deg": TERMINAL_HEADING_SOFT_DEVIATION_DEG,
+            "speed_threshold_by_class": dict(TERMINAL_HEADING_SPEED_THRESHOLD_BY_CLASS),
+            "boundary_margin_px": TERMINAL_BOUNDARY_MARGIN_PX,
+            "confidence_low_threshold": TERMINAL_CONFIDENCE_LOW,
+            "speed_drop_ratio": TERMINAL_SPEED_DROP_RATIO,
+            "protected_track_count": 0,
+            "protected_frame_count": 0,
+            "protected_track_labels": set(),
+            "protected_tracks": [],
         },
         "outlier_frame_count": 0,
         "split_track_count": 0,
@@ -2520,7 +2844,8 @@ def convert_dataset(
     log_line("INFO", f"raw_object_id_count={raw_object_count}")
 
     fragments = _split_raw_tracks(raw_rows, frame_rate, logger, quality)
-    tracks_meta, tracks_rows = _build_final_tracks(fragments, frame_rate, logger, quality)
+    video_size = {"width": video_info.get("width"), "height": video_info.get("height")}
+    tracks_meta, tracks_rows = _build_final_tracks(fragments, frame_rate, logger, quality, video_size)
     missing_ratios = [float(item["missing_ratio"]) for item in quality["track_missing_stats"]]
     quality["missing_ratio_summary"] = {
         "raw_track_count": raw_object_count,
@@ -2642,6 +2967,8 @@ def convert_dataset(
     log_line("INFO", f"direct_motion_too_short_or_unsmoothed_track_count={quality['direct_motion_smoothing']['too_short_or_unsmoothed_track_count']}")
     log_line("INFO", f"direct_motion_shrunk_window_track_count={quality['direct_motion_smoothing']['shrunk_window_track_count']}")
     log_line("INFO", f"direct_motion_field_delta_summary={quality['direct_motion_smoothing']['field_delta_summary']}")
+    log_line("INFO", f"bounded_motion_smoothing={quality['bounded_motion_smoothing']}")
+    log_line("INFO", f"terminal_heading_protection={quality['terminal_heading_protection']}")
     log_line("INFO", f"short_track_filter_parameters={quality['short_track_filter_parameters']}")
     log_line("INFO", f"raw_track_count={quality['missing_ratio_summary']['raw_track_count']}")
     log_line("INFO", f"kept_track_count={quality['missing_ratio_summary']['kept_track_count']}")

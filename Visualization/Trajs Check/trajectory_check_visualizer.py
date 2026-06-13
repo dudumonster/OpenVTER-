@@ -253,6 +253,22 @@ def _differentiate(values, frames, frame_rate):
     return out
 
 
+def _position_second_difference(xs, ys):
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    out = np.full(len(xs), np.nan, dtype=float)
+    if len(xs) < 3:
+        return out
+    for i in range(1, len(xs) - 1):
+        values = [xs[i - 1], xs[i], xs[i + 1], ys[i - 1], ys[i], ys[i + 1]]
+        if not np.all(np.isfinite(values)):
+            continue
+        ddx = xs[i + 1] - 2.0 * xs[i] + xs[i - 1]
+        ddy = ys[i + 1] - 2.0 * ys[i] + ys[i - 1]
+        out[i] = math.hypot(float(ddx), float(ddy))
+    return out
+
+
 def _relative_error(error, reference_norm, abs_tol):
     error = np.asarray(error, dtype=float)
     reference_norm = np.asarray(reference_norm, dtype=float)
@@ -307,6 +323,11 @@ def compute_track_kinematic_checks(track_df, frame_rate=29.97):
         DERIVATIVE_CONSISTENCY["acceleration_rel_tol"] * df["acceleration_derivative_reference_norm"],
     )
     df["acceleration_derivative_over_20pct"] = df["acceleration_derivative_error"] > acceleration_allowed_error
+
+    df["jx_from_acc"] = _differentiate(df["xAcceleration"].values, df["frame"].values, frame_rate)
+    df["jy_from_acc"] = _differentiate(df["yAcceleration"].values, df["frame"].values, frame_rate)
+    df["jerk_xy"] = np.sqrt(df["jx_from_acc"] ** 2 + df["jy_from_acc"] ** 2)
+    df["position_second_diff"] = _position_second_difference(df["xCenter"].values, df["yCenter"].values)
 
     # Heading-compatible convention for this dataset:
     # 0 deg = +Y, 90 deg = +X. Therefore the motion direction must use
@@ -394,6 +415,9 @@ def summarize_track(track_df, track_meta_row):
         "max_acceleration_derivative_error": _safe_max(checked["acceleration_derivative_error"]),
         "p95_acceleration_derivative_error": _safe_p95(checked["acceleration_derivative_error"]),
         "acceleration_derivative_over_20pct_ratio": _safe_ratio(checked["acceleration_derivative_over_20pct"]),
+        "p95_jerk_xy": _safe_p95(checked["jerk_xy"]),
+        "max_jerk_xy": _safe_max(checked["jerk_xy"]),
+        "p95_position_second_diff": _safe_p95(checked["position_second_diff"]),
         "num_abnormal_frames": num_abnormal,
         "abnormal_ratio": abnormal_ratio,
         "nan_lonVelocity": int(checked["lonVelocity"].isnull().sum()),
@@ -434,6 +458,9 @@ def _print_track_summary(summary):
         "max_acceleration_derivative_error",
         "p95_acceleration_derivative_error",
         "acceleration_derivative_over_20pct_ratio",
+        "p95_jerk_xy",
+        "max_jerk_xy",
+        "p95_position_second_diff",
         "num_abnormal_frames",
         "abnormal_ratio",
         "nan_lonVelocity",
@@ -526,6 +553,9 @@ def _summary_text(summary, checked):
         "max_acc_deriv_error: %s" % _format_number(summary["max_acceleration_derivative_error"]),
         "p95_acc_deriv_error: %s" % _format_number(summary["p95_acceleration_derivative_error"]),
         "acc_deriv_over20_ratio: %s" % _format_number(summary["acceleration_derivative_over_20pct_ratio"]),
+        "p95_jerk_xy: %s" % _format_number(summary["p95_jerk_xy"]),
+        "max_jerk_xy: %s" % _format_number(summary["max_jerk_xy"]),
+        "p95_position_second_diff: %s" % _format_number(summary["p95_position_second_diff"]),
         "num_abnormal_frames: %s" % summary["num_abnormal_frames"],
         "abnormal_ratio: %s" % _format_number(summary["abnormal_ratio"]),
         "NaN lon/lat vel: %s/%s" % (summary["nan_lonVelocity"], summary["nan_latVelocity"]),
@@ -789,6 +819,9 @@ def _global_summary_text(checked, folder_name, quality_report=None):
         "max_acceleration_derivative_error: %s" % _format_number(_safe_max(checked["acceleration_derivative_error"])),
         "p95_acceleration_derivative_error: %s" % _format_number(_safe_p95(checked["acceleration_derivative_error"])),
         "acceleration_deriv_over20_ratio: %s" % _format_number(_safe_ratio(checked["acceleration_derivative_over_20pct"])),
+        "p95_jerk_xy: %s" % _format_number(_safe_p95(checked["jerk_xy"])),
+        "max_jerk_xy: %s" % _format_number(_safe_max(checked["jerk_xy"])),
+        "p95_position_second_diff: %s" % _format_number(_safe_p95(checked["position_second_diff"])),
         "terminal_heading_protected_frames: %s" % terminal_stats["terminal_heading_protected_frame_count"],
         "terminal_heading_protected_tracks: %s" % terminal_stats["terminal_heading_protected_track_count"],
         "num_abnormal_rows: %s" % int(checked["abnormal_frame"].sum()),

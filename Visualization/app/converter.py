@@ -83,6 +83,42 @@ SMOOTH_METHOD = "savgol"
 HEADING_SMOOTH_WINDOW = 5
 ENABLE_DIRECT_MOTION_FIELD_SMOOTHING = True
 MOTION_SMOOTH_METHOD = "savgol"
+ENABLE_RTS_MOTION_SMOOTHING = True
+RTS_FALLBACK_TO_SAVGOL = True
+RTS_STATE_MODEL = "constant_acceleration"
+RTS_OBSERVATION_MODE = "position"  # "position" or "position_velocity"
+RTS_MIN_TRACK_FRAMES = 5
+RTS_GATE_MODE = "mahalanobis"
+RTS_GATE_THRESHOLD = 13.82
+RTS_GATE_ACTION = "inflate_r"  # "inflate_r" or "skip_update"
+RTS_INTERPOLATED_R_SCALE = 20.0
+RTS_LOW_CONFIDENCE_R_SCALE = 5.0
+RTS_OUTLIER_R_SCALE = 100.0
+RTS_MIN_COVARIANCE = 1e-9
+RTS_MAX_POSITION_DRIFT_WARN = 3.0
+RTS_CLASS_GROUPS = {
+    "vehicle": {"car", "van", "truck", "bus", "freight_car"},
+    "light_vru": {"motor", "bicycle", "tricycle", "awning-tricycle"},
+    "pedestrian": {"pedestrian", "people"},
+}
+RTS_PROCESS_NOISE_JERK_BY_GROUP = {
+    "vehicle": 1.0,
+    "light_vru": 2.5,
+    "pedestrian": 4.0,
+    "default": 2.0,
+}
+RTS_POSITION_NOISE_BY_GROUP = {
+    "vehicle": 0.25,
+    "light_vru": 0.35,
+    "pedestrian": 0.45,
+    "default": 0.35,
+}
+RTS_VELOCITY_NOISE_BY_GROUP = {
+    "vehicle": 1.0,
+    "light_vru": 1.5,
+    "pedestrian": 2.0,
+    "default": 1.5,
+}
 VELOCITY_SMOOTH_WINDOW_BY_CLASS = {
     "car": 45,
     "van": 45,
@@ -183,6 +219,21 @@ TERMINAL_HEADING_SPEED_THRESHOLD_BY_CLASS = {
     "people": 0.35,
     "default": 0.7,
 }
+ENABLE_INITIAL_HEADING_PROTECTION = True
+INITIAL_HEADING_START_FRAME_MAX = 30
+INITIAL_HEADING_CHECK_FRAMES = 30
+INITIAL_HEADING_FUTURE_SEARCH_START = 5
+INITIAL_HEADING_FUTURE_SEARCH_FRAMES = 80
+INITIAL_HEADING_STABLE_WINDOW = 15
+INITIAL_HEADING_ANCHOR_FRAMES = 10
+INITIAL_HEADING_TRANSITION_FRAMES = 20
+INITIAL_HEADING_MIN_STABLE_SPEED = 0.30
+INITIAL_HEADING_MAX_STABLE_DEVIATION_DEG = 5.0
+INITIAL_HEADING_MAX_STABLE_JUMP_DEG = 3.0
+INITIAL_HEADING_RISK_MAX_DELTA_DEG = 3.5
+INITIAL_HEADING_RISK_SPREAD_DEG = 20.0
+INITIAL_HEADING_RISK_LOW_SPEED = 0.8
+INITIAL_HEADING_MIN_ANCHOR_CHANGE_DEG = 8.0
 TERMINAL_BOUNDARY_MARGIN_PX = 35.0
 TERMINAL_CONFIDENCE_LOW = 0.45
 TERMINAL_SPEED_DROP_RATIO = 0.55
@@ -1830,6 +1881,212 @@ def _apply_terminal_heading_protection(
     return out
 
 
+def _signed_angle_delta_deg(start: float, end: float) -> float:
+    return (float(end) - float(start) + 180.0) % 360.0 - 180.0
+
+
+def _interpolate_heading_deg(start: float, end: float, alpha: float) -> float:
+    return (float(start) + _signed_angle_delta_deg(start, end) * max(0.0, min(1.0, float(alpha)))) % 360.0
+
+
+def _angle_spread_deg(values: List[float]) -> float:
+    center = _circular_mean_degrees(values)
+    if center is None:
+        return 0.0
+    deviations = [abs(_signed_angle_delta_deg(center, value)) for value in values if _is_valid_heading(value)]
+    return float(np.percentile(deviations, 95) * 2.0) if deviations else 0.0
+
+
+def _angle_max_jump_deg(values: List[float]) -> float:
+    jumps = []
+    for prev, cur in zip(values[:-1], values[1:]):
+        if _is_valid_heading(prev) and _is_valid_heading(cur):
+            jumps.append(abs(_signed_angle_delta_deg(prev, cur)))
+    return float(max(jumps)) if jumps else 0.0
+
+
+def _initial_heading_risk(
+    rows: List[Dict[str, Any]],
+    headings: List[float],
+    motion_headings: List[float],
+    speeds: List[float],
+) -> Tuple[bool, Dict[str, float]]:
+    n = min(len(rows), len(headings), len(motion_headings), len(speeds))
+    if n < int(INITIAL_HEADING_STABLE_WINDOW) + int(INITIAL_HEADING_FUTURE_SEARCH_START):
+        return False, {}
+    if int(rows[0]["frame"]) > int(INITIAL_HEADING_START_FRAME_MAX):
+        return False, {}
+
+    check_n = min(int(INITIAL_HEADING_CHECK_FRAMES), n)
+    early_headings = [float(value) for value in headings[:check_n] if _is_valid_heading(value)]
+    early_motion = [float(value) for value in motion_headings[:check_n] if _is_valid_heading(value)]
+    early_speeds = [float(value) for value in speeds[:check_n] if _finite(value)]
+    if len(early_headings) < 3 or len(early_motion) < 3 or not early_speeds:
+        return False, {}
+
+    heading_max_jump = _angle_max_jump_deg(early_headings)
+    heading_spread = _angle_spread_deg(early_headings)
+    motion_max_jump = _angle_max_jump_deg(early_motion)
+    motion_spread = _angle_spread_deg(early_motion)
+    min_speed = float(min(early_speeds))
+    median_speed = float(np.median(np.asarray(early_speeds, dtype=float)))
+    direction_unstable = (
+        heading_max_jump >= float(INITIAL_HEADING_RISK_MAX_DELTA_DEG)
+        and heading_spread >= float(INITIAL_HEADING_RISK_SPREAD_DEG)
+    ) or (
+        motion_max_jump >= 2.0 * float(INITIAL_HEADING_RISK_MAX_DELTA_DEG)
+        and motion_spread >= 1.5 * float(INITIAL_HEADING_RISK_SPREAD_DEG)
+    )
+    speed_sensitive = min_speed < float(INITIAL_HEADING_RISK_LOW_SPEED) or median_speed < float(INITIAL_HEADING_RISK_LOW_SPEED)
+    metrics = {
+        "check_frames": float(check_n),
+        "heading_max_jump": heading_max_jump,
+        "heading_spread": heading_spread,
+        "motion_max_jump": motion_max_jump,
+        "motion_spread": motion_spread,
+        "min_speed": min_speed,
+        "median_speed": median_speed,
+    }
+    return bool(direction_unstable and speed_sensitive), metrics
+
+
+def _future_stable_heading(
+    rows: List[Dict[str, Any]],
+    motion_headings: List[float],
+    speeds: List[float],
+    x_vel: List[float],
+    y_vel: List[float],
+) -> Tuple[Optional[float], Optional[int], Dict[str, float]]:
+    n = min(len(rows), len(motion_headings), len(speeds), len(x_vel), len(y_vel))
+    window = int(INITIAL_HEADING_STABLE_WINDOW)
+    if n < window:
+        return None, None, {}
+    start_min = min(max(int(INITIAL_HEADING_FUTURE_SEARCH_START), 0), n - window)
+    start_max = min(n - window, int(INITIAL_HEADING_FUTURE_SEARCH_FRAMES))
+    best: Optional[Tuple[float, int, float, Dict[str, float]]] = None
+    for start in range(start_min, start_max + 1):
+        end = start + window
+        window_speeds = [float(value) for value in speeds[start:end] if _finite(value)]
+        window_headings = [float(value) for value in motion_headings[start:end] if _is_valid_heading(value)]
+        if len(window_speeds) < window or len(window_headings) < window:
+            continue
+        median_speed = float(np.median(np.asarray(window_speeds, dtype=float)))
+        if median_speed < float(INITIAL_HEADING_MIN_STABLE_SPEED):
+            continue
+        heading_spread = _angle_spread_deg(window_headings)
+        max_jump = _angle_max_jump_deg(window_headings)
+        if heading_spread > float(INITIAL_HEADING_MAX_STABLE_DEVIATION_DEG) * 2.0:
+            continue
+        if max_jump > float(INITIAL_HEADING_MAX_STABLE_JUMP_DEG):
+            continue
+        mean_vx = float(np.mean(np.asarray(x_vel[start:end], dtype=float)))
+        mean_vy = float(np.mean(np.asarray(y_vel[start:end], dtype=float)))
+        if not (_finite(mean_vx) and _finite(mean_vy)) or math.hypot(mean_vx, mean_vy) < 1e-9:
+            anchor = _circular_mean_degrees(window_headings)
+        else:
+            anchor = math.degrees(math.atan2(mean_vx, mean_vy)) % 360.0
+        if anchor is None:
+            continue
+        score = heading_spread + max_jump + 0.10 * float(start)
+        metrics = {
+            "stable_window_start_index": float(start),
+            "stable_window_end_index": float(end - 1),
+            "stable_window_median_speed": median_speed,
+            "stable_window_heading_spread": heading_spread,
+            "stable_window_max_jump": max_jump,
+        }
+        if best is None or score < best[0]:
+            best = (score, start, float(anchor), metrics)
+    if best is None:
+        return None, None, {}
+    return best[2], best[1], best[3]
+
+
+def _record_initial_heading_protection(
+    quality: Dict[str, Any],
+    label: str,
+    final_class: str,
+    protected_indices: List[int],
+    rows: List[Dict[str, Any]],
+    stable_heading: float,
+    risk_metrics: Dict[str, float],
+    stable_metrics: Dict[str, float],
+) -> None:
+    if not protected_indices:
+        return
+    stats = quality["initial_heading_protection"]
+    stats["protected_track_labels"].add(label)
+    stats["protected_track_count"] = len(stats["protected_track_labels"])
+    stats["protected_frame_count"] += len(protected_indices)
+    stats["protected_tracks"].append(
+        {
+            "track": label,
+            "class": final_class,
+            "protected_frame_count": len(protected_indices),
+            "first_frame": int(rows[min(protected_indices)]["frame"]),
+            "last_frame": int(rows[max(protected_indices)]["frame"]),
+            "stable_heading": float(stable_heading),
+            "risk_metrics": dict(risk_metrics),
+            "stable_metrics": dict(stable_metrics),
+        }
+    )
+
+
+def _apply_initial_heading_protection(
+    rows: List[Dict[str, Any]],
+    headings: List[float],
+    x_vel: List[float],
+    y_vel: List[float],
+    final_class: str,
+    label: str,
+    quality: Dict[str, Any],
+) -> List[float]:
+    """
+    Protect the first frames of video-start tracks from unstable initial
+    velocity headings. Unlike terminal protection, this looks forward for a
+    stable motion window and blends back to the original heading after a short
+    anchor segment.
+    """
+    if not ENABLE_INITIAL_HEADING_PROTECTION or not rows or not headings:
+        return headings
+    n = min(len(rows), len(headings), len(x_vel), len(y_vel))
+    if n <= 0:
+        return headings
+    out = [float(value) % 360.0 for value in headings]
+    speeds = [math.hypot(float(vx), float(vy)) for vx, vy in zip(x_vel[:n], y_vel[:n])]
+    motion_headings = [
+        math.degrees(math.atan2(float(vx), float(vy))) % 360.0 if math.hypot(float(vx), float(vy)) > 1e-9 else out[i]
+        for i, (vx, vy) in enumerate(zip(x_vel[:n], y_vel[:n]))
+    ]
+
+    risky, risk_metrics = _initial_heading_risk(rows[:n], out[:n], motion_headings, speeds)
+    if not risky:
+        return out
+    anchor, stable_start, stable_metrics = _future_stable_heading(rows[:n], motion_headings, speeds, x_vel[:n], y_vel[:n])
+    if anchor is None or stable_start is None:
+        return out
+    if abs(_signed_angle_delta_deg(out[0], anchor)) < float(INITIAL_HEADING_MIN_ANCHOR_CHANGE_DEG):
+        return out
+
+    anchor_count = min(int(INITIAL_HEADING_ANCHOR_FRAMES), n, max(1, int(stable_start)))
+    transition_count = min(int(INITIAL_HEADING_TRANSITION_FRAMES), max(0, n - anchor_count))
+    protected: List[int] = []
+    for i in range(anchor_count):
+        if abs(_signed_angle_delta_deg(out[i], anchor)) > 1e-6:
+            out[i] = float(anchor) % 360.0
+            protected.append(i)
+    for offset in range(transition_count):
+        i = anchor_count + offset
+        alpha = float(offset + 1) / float(transition_count + 1)
+        candidate = _interpolate_heading_deg(anchor, headings[i], alpha)
+        if abs(_signed_angle_delta_deg(out[i], candidate)) > 1e-6:
+            out[i] = candidate
+            protected.append(i)
+
+    _record_initial_heading_protection(quality, label, final_class, protected, rows[:n], float(anchor), risk_metrics, stable_metrics)
+    return out
+
+
 def _valid_dimensions(rows: List[Dict[str, Any]], quality: Dict[str, Any]) -> Tuple[List[float], List[float]]:
     widths = [float(row["raw_width"]) for row in rows if _finite(row.get("raw_width")) and row["raw_width"] > 0]
     lengths = [float(row["raw_length"]) for row in rows if _finite(row.get("raw_length")) and row["raw_length"] > 0]
@@ -1968,7 +2225,387 @@ def refine_heading_for_visualization(
     return _smooth_angles_degrees(final, HEADING_SMOOTH_WINDOW if ENABLE_HEADING_REFINEMENT else 1)
 
 
-def smooth_track_and_refine_motion(
+def _rts_class_group(final_class: str) -> str:
+    for group, classes in RTS_CLASS_GROUPS.items():
+        if final_class in classes:
+            return group
+    return "default"
+
+
+def _rts_group_value(config: Dict[str, float], final_class: str) -> float:
+    group = _rts_class_group(final_class)
+    return float(config.get(group, config["default"]))
+
+
+def _rts_transition_matrix(dt: float) -> np.ndarray:
+    dt = max(float(dt), 1e-6)
+    half_dt2 = 0.5 * dt * dt
+    return np.asarray(
+        [
+            [1.0, 0.0, dt, 0.0, half_dt2, 0.0],
+            [0.0, 1.0, 0.0, dt, 0.0, half_dt2],
+            [0.0, 0.0, 1.0, 0.0, dt, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, dt],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+
+
+def _rts_process_noise(dt: float, jerk_noise: float) -> np.ndarray:
+    """White-jerk CA process noise for state [x, y, vx, vy, ax, ay]."""
+    dt = max(float(dt), 1e-6)
+    q = max(float(jerk_noise), float(RTS_MIN_COVARIANCE))
+    q1d = q * np.asarray(
+        [
+            [dt**5 / 20.0, dt**4 / 8.0, dt**3 / 6.0],
+            [dt**4 / 8.0, dt**3 / 3.0, dt**2 / 2.0],
+            [dt**3 / 6.0, dt**2 / 2.0, dt],
+        ],
+        dtype=float,
+    )
+    out = np.zeros((6, 6), dtype=float)
+    x_idx = [0, 2, 4]
+    y_idx = [1, 3, 5]
+    for a, ia in enumerate(x_idx):
+        for b, ib in enumerate(x_idx):
+            out[ia, ib] = q1d[a, b]
+    for a, ia in enumerate(y_idx):
+        for b, ib in enumerate(y_idx):
+            out[ia, ib] = q1d[a, b]
+    return out
+
+
+def _symmetrize_covariance(matrix: np.ndarray) -> np.ndarray:
+    out = (np.asarray(matrix, dtype=float) + np.asarray(matrix, dtype=float).T) * 0.5
+    if not np.all(np.isfinite(out)):
+        raise ValueError("non-finite covariance")
+    min_cov = float(RTS_MIN_COVARIANCE)
+    try:
+        min_eigenvalue = float(np.min(np.linalg.eigvalsh(out)))
+    except Exception as exc:
+        raise ValueError("invalid covariance eigenspectrum") from exc
+    if min_eigenvalue < min_cov:
+        out = out + np.eye(out.shape[0], dtype=float) * (min_cov - min_eigenvalue + min_cov)
+    return out
+
+
+def _solve_spd_vector(matrix: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    try:
+        return np.linalg.solve(matrix, vector)
+    except np.linalg.LinAlgError:
+        return np.linalg.pinv(matrix) @ vector
+
+
+def _right_multiply_inverse(left: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    try:
+        return np.linalg.solve(matrix.T, left.T).T
+    except np.linalg.LinAlgError:
+        return left @ np.linalg.pinv(matrix)
+
+
+def _rts_raw_motion_from_positions(xs: np.ndarray, ys: np.ndarray, frames: List[int], frame_rate: float) -> Tuple[List[float], List[float], List[float], List[float]]:
+    x_values = [float(v) for v in xs]
+    y_values = [float(v) for v in ys]
+    vx = _differentiate(x_values, frames, frame_rate)
+    vy = _differentiate(y_values, frames, frame_rate)
+    ax = _differentiate(vx, frames, frame_rate) if len(vx) > 1 else [0.0 for _ in vx]
+    ay = _differentiate(vy, frames, frame_rate) if len(vy) > 1 else [0.0 for _ in vy]
+    return vx, vy, ax, ay
+
+
+def _rts_observation(
+    i: int,
+    rows: List[Dict[str, Any]],
+    xs: np.ndarray,
+    ys: np.ndarray,
+    raw_vx: List[float],
+    raw_vy: List[float],
+    final_class: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool, bool]:
+    position_std = _rts_group_value(RTS_POSITION_NOISE_BY_GROUP, final_class)
+    velocity_std = _rts_group_value(RTS_VELOCITY_NOISE_BY_GROUP, final_class)
+    if RTS_OBSERVATION_MODE == "position_velocity":
+        z = np.asarray([xs[i], ys[i], raw_vx[i], raw_vy[i]], dtype=float)
+        h = np.asarray(
+            [
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            ],
+            dtype=float,
+        )
+        r_diag = [position_std**2, position_std**2, velocity_std**2, velocity_std**2]
+    else:
+        z = np.asarray([xs[i], ys[i]], dtype=float)
+        h = np.asarray(
+            [
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=float,
+        )
+        r_diag = [position_std**2, position_std**2]
+    r = np.diag(np.maximum(np.asarray(r_diag, dtype=float), float(RTS_MIN_COVARIANCE)))
+    is_interpolated = bool(rows[i].get("is_interpolated", False))
+    confidence = _safe_float(rows[i].get("confidence"))
+    is_low_confidence = confidence is None or confidence < float(TERMINAL_CONFIDENCE_LOW)
+    if is_interpolated:
+        r *= float(RTS_INTERPOLATED_R_SCALE)
+    if is_low_confidence:
+        r *= float(RTS_LOW_CONFIDENCE_R_SCALE)
+    return z, h, r, is_interpolated, is_low_confidence
+
+
+def _rts_update_drift_summary(stats: Dict[str, Any], track_stats: Dict[str, Any]) -> None:
+    summary = stats["position_drift_summary"]
+    success_count = max(int(stats.get("success_track_count", 0)), 1)
+    mean_drift = float(track_stats.get("mean_position_drift", 0.0) or 0.0)
+    old_mean = float(summary.get("mean_track_mean_position_drift", 0.0) or 0.0)
+    summary["mean_track_mean_position_drift"] = old_mean + (mean_drift - old_mean) / float(success_count)
+    summary["max_track_p95_position_drift"] = max(float(summary.get("max_track_p95_position_drift", 0.0) or 0.0), float(track_stats.get("p95_position_drift", 0.0) or 0.0))
+    summary["max_position_drift"] = max(float(summary.get("max_position_drift", 0.0) or 0.0), float(track_stats.get("max_position_drift", 0.0) or 0.0))
+    if track_stats.get("position_drift_warning"):
+        summary["warning_track_count"] = int(summary.get("warning_track_count", 0) or 0) + 1
+
+
+def _record_rts_track_result(quality: Dict[str, Any], final_class: str, track_stats: Dict[str, Any]) -> None:
+    stats = quality["rts_motion_smoothing"]
+    class_stats = stats["by_class"].setdefault(
+        final_class,
+        {
+            "track_count": 0,
+            "success_track_count": 0,
+            "fallback_track_count": 0,
+            "failed_track_count": 0,
+            "gated_frame_count": 0,
+            "skipped_update_count": 0,
+            "inflated_r_count": 0,
+            "interpolated_observation_count": 0,
+            "low_confidence_observation_count": 0,
+        },
+    )
+    class_stats["track_count"] += 1
+    stats["track_count"] += 1
+    if track_stats.get("fallback"):
+        stats["fallback_track_count"] += 1
+        class_stats["fallback_track_count"] += 1
+    elif track_stats.get("success"):
+        stats["success_track_count"] += 1
+        class_stats["success_track_count"] += 1
+        _rts_update_drift_summary(stats, track_stats)
+    if track_stats.get("failed"):
+        stats["failed_track_count"] += 1
+        class_stats["failed_track_count"] += 1
+    for key in ("gated_frame_count", "skipped_update_count", "inflated_r_count", "interpolated_observation_count", "low_confidence_observation_count"):
+        stats[key] += int(track_stats.get(key, 0) or 0)
+        if key in class_stats:
+            class_stats[key] += int(track_stats.get(key, 0) or 0)
+    stats["tracks"].append(track_stats)
+
+
+def _rts_fallback_stats(
+    label: str,
+    final_class: str,
+    frame_count: int,
+    reason: str,
+    failed: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "track": label,
+        "final_class": final_class,
+        "frame_count": int(frame_count),
+        "success": False,
+        "fallback": True,
+        "failed": bool(failed),
+        "fallback_reason": reason,
+        "gated_frame_count": 0,
+        "gated_frame_ratio": 0.0,
+        "skipped_update_count": 0,
+        "inflated_r_count": 0,
+        "interpolated_observation_count": 0,
+        "low_confidence_observation_count": 0,
+        "mean_position_drift": math.nan,
+        "p95_position_drift": math.nan,
+        "max_position_drift": math.nan,
+        "position_drift_warning": False,
+    }
+
+
+def apply_rts_motion_smoothing(
+    track_rows: List[Dict[str, Any]],
+    final_class: str,
+    frame_rate: float,
+    logger: logging.Logger,
+    label: str,
+    video_size: Optional[Dict[str, float]] = None,
+) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float], Dict[str, Any]]:
+    """
+    Run a constant-acceleration Kalman filter followed by a fixed-interval
+    Rauch-Tung-Striebel smoother. Position, velocity, and acceleration are
+    estimated as one state, so exported motion fields stay mutually consistent.
+    """
+    if RTS_STATE_MODEL != "constant_acceleration":
+        raise ValueError(f"unsupported RTS_STATE_MODEL={RTS_STATE_MODEL}")
+    if RTS_OBSERVATION_MODE not in {"position", "position_velocity"}:
+        raise ValueError(f"unsupported RTS_OBSERVATION_MODE={RTS_OBSERVATION_MODE}")
+
+    rows = sorted(track_rows, key=lambda row: int(row["frame"]))
+    n = len(rows)
+    if n < int(RTS_MIN_TRACK_FRAMES):
+        raise ValueError(f"track shorter than RTS_MIN_TRACK_FRAMES={RTS_MIN_TRACK_FRAMES}")
+    frames = [int(row["frame"]) for row in rows]
+    xs, x_valid_count = _fill_nan_numeric([float(row.get("xCenter_raw", math.nan)) for row in rows])
+    ys, y_valid_count = _fill_nan_numeric([float(row.get("yCenter_raw", math.nan)) for row in rows])
+    if min(x_valid_count, y_valid_count) < 2:
+        raise ValueError("not enough finite center observations")
+    if not (np.all(np.isfinite(xs)) and np.all(np.isfinite(ys))):
+        raise ValueError("non-finite center observations after interpolation")
+
+    raw_vx, raw_vy, raw_ax, raw_ay = _rts_raw_motion_from_positions(xs, ys, frames, frame_rate)
+    if not all(np.isfinite(value) for value in raw_vx + raw_vy + raw_ax + raw_ay):
+        raise ValueError("non-finite raw finite-difference motion")
+
+    position_std = _rts_group_value(RTS_POSITION_NOISE_BY_GROUP, final_class)
+    velocity_std = _rts_group_value(RTS_VELOCITY_NOISE_BY_GROUP, final_class)
+    jerk_noise = _rts_group_value(RTS_PROCESS_NOISE_JERK_BY_GROUP, final_class)
+    x_state = np.asarray([xs[0], ys[0], raw_vx[0], raw_vy[0], raw_ax[0], raw_ay[0]], dtype=float)
+    p_state = np.diag(
+        [
+            max(position_std**2, RTS_MIN_COVARIANCE),
+            max(position_std**2, RTS_MIN_COVARIANCE),
+            max((2.0 * velocity_std) ** 2, RTS_MIN_COVARIANCE),
+            max((2.0 * velocity_std) ** 2, RTS_MIN_COVARIANCE),
+            25.0,
+            25.0,
+        ]
+    )
+    p_state = _symmetrize_covariance(p_state)
+
+    x_pred = np.zeros((n, 6), dtype=float)
+    p_pred = np.zeros((n, 6, 6), dtype=float)
+    x_filt = np.zeros((n, 6), dtype=float)
+    p_filt = np.zeros((n, 6, 6), dtype=float)
+    f_steps: List[np.ndarray] = []
+    gated_count = 0
+    skipped_count = 0
+    inflated_count = 0
+    interpolated_count = 0
+    low_confidence_count = 0
+    identity = np.eye(6, dtype=float)
+
+    for i in range(n):
+        if i == 0:
+            x_i_pred = x_state
+            p_i_pred = p_state
+        else:
+            dt = (frames[i] - frames[i - 1]) / float(frame_rate)
+            dt = max(dt, 1.0 / float(frame_rate))
+            f = _rts_transition_matrix(dt)
+            q = _rts_process_noise(dt, jerk_noise)
+            f_steps.append(f)
+            x_i_pred = f @ x_state
+            p_i_pred = _symmetrize_covariance(f @ p_state @ f.T + q)
+        x_pred[i] = x_i_pred
+        p_pred[i] = p_i_pred
+
+        z, h, r, is_interpolated, is_low_confidence = _rts_observation(i, rows, xs, ys, raw_vx, raw_vy, final_class)
+        interpolated_count += int(is_interpolated)
+        low_confidence_count += int(is_low_confidence)
+        innovation = z - h @ x_i_pred
+        s = _symmetrize_covariance(h @ p_i_pred @ h.T + r)
+        d2 = float(innovation.T @ _solve_spd_vector(s, innovation))
+        skip_update = False
+        if RTS_GATE_MODE == "mahalanobis" and d2 > float(RTS_GATE_THRESHOLD):
+            gated_count += 1
+            if RTS_GATE_ACTION == "skip_update":
+                skip_update = True
+                skipped_count += 1
+            else:
+                r = r * float(RTS_OUTLIER_R_SCALE)
+                inflated_count += 1
+                s = _symmetrize_covariance(h @ p_i_pred @ h.T + r)
+        if skip_update:
+            x_state = x_i_pred
+            p_state = p_i_pred
+        else:
+            k_gain = _right_multiply_inverse(p_i_pred @ h.T, s)
+            x_state = x_i_pred + k_gain @ (z - h @ x_i_pred)
+            ikh = identity - k_gain @ h
+            p_state = _symmetrize_covariance(ikh @ p_i_pred @ ikh.T + k_gain @ r @ k_gain.T)
+        if not (np.all(np.isfinite(x_state)) and np.all(np.isfinite(p_state))):
+            raise ValueError("non-finite filtered RTS state")
+        x_filt[i] = x_state
+        p_filt[i] = p_state
+
+    if len(f_steps) != n - 1:
+        raise ValueError("RTS transition history length mismatch")
+
+    x_smooth = np.array(x_filt, dtype=float, copy=True)
+    p_smooth = np.array(p_filt, dtype=float, copy=True)
+    for k in range(n - 2, -1, -1):
+        gain = _right_multiply_inverse(p_filt[k] @ f_steps[k].T, p_pred[k + 1])
+        x_smooth[k] = x_filt[k] + gain @ (x_smooth[k + 1] - x_pred[k + 1])
+        p_smooth[k] = _symmetrize_covariance(p_filt[k] + gain @ (p_smooth[k + 1] - p_pred[k + 1]) @ gain.T)
+        if not (np.all(np.isfinite(x_smooth[k])) and np.all(np.isfinite(p_smooth[k]))):
+            raise ValueError("non-finite smoothed RTS state")
+
+    out_xs = [float(value) for value in x_smooth[:, 0]]
+    out_ys = [float(value) for value in x_smooth[:, 1]]
+    x_vel = [float(value) for value in x_smooth[:, 2]]
+    y_vel = [float(value) for value in x_smooth[:, 3]]
+    x_acc = [float(value) for value in x_smooth[:, 4]]
+    y_acc = [float(value) for value in x_smooth[:, 5]]
+
+    speeds = [math.hypot(vx, vy) for vx, vy in zip(x_vel, y_vel)]
+    motion_headings: List[Optional[float]] = []
+    stable_motion_headings: List[Optional[float]] = []
+    last_motion: Optional[float] = None
+    for vx, vy, speed in zip(x_vel, y_vel, speeds):
+        if speed >= LOW_SPEED_THRESHOLD:
+            last_motion = math.degrees(math.atan2(float(vx), float(vy))) % 360.0
+            motion_headings.append(last_motion)
+            stable_motion_headings.append(last_motion)
+        else:
+            motion_headings.append(last_motion)
+            stable_motion_headings.append(None)
+    fallback_heading = next((heading for heading in motion_headings if heading is not None), 0.0)
+    motion_headings = [heading if heading is not None else fallback_heading for heading in motion_headings]
+    headings = refine_heading_for_visualization(rows, motion_headings, stable_motion_headings, speeds, logger, label)
+
+    drift = np.hypot(x_smooth[:, 0] - xs, x_smooth[:, 1] - ys)
+    mean_drift = float(np.mean(drift)) if drift.size else 0.0
+    p95_drift = float(np.percentile(drift, 95)) if drift.size else 0.0
+    max_drift = float(np.max(drift)) if drift.size else 0.0
+    track_stats = {
+        "track": label,
+        "final_class": final_class,
+        "class_group": _rts_class_group(final_class),
+        "frame_count": int(n),
+        "success": True,
+        "fallback": False,
+        "failed": False,
+        "fallback_reason": "",
+        "gated_frame_count": int(gated_count),
+        "gated_frame_ratio": float(gated_count) / float(n) if n else 0.0,
+        "skipped_update_count": int(skipped_count),
+        "inflated_r_count": int(inflated_count),
+        "interpolated_observation_count": int(interpolated_count),
+        "low_confidence_observation_count": int(low_confidence_count),
+        "mean_position_drift": mean_drift,
+        "p95_position_drift": p95_drift,
+        "max_position_drift": max_drift,
+        "position_drift_warning": bool(p95_drift > float(RTS_MAX_POSITION_DRIFT_WARN) or max_drift > float(RTS_MAX_POSITION_DRIFT_WARN)),
+        "jerk_noise": float(jerk_noise),
+        "position_noise": float(position_std),
+        "velocity_noise": float(velocity_std),
+    }
+    return out_xs, out_ys, headings, x_vel, y_vel, x_acc, y_acc, track_stats
+
+
+def smooth_track_and_refine_motion_savgol(
     track_rows: List[Dict[str, Any]],
     final_class: str,
     frame_rate: float,
@@ -2026,8 +2663,57 @@ def smooth_track_and_refine_motion(
             quality,
             angle=True,
         )
+    headings = _apply_initial_heading_protection(rows, headings, x_vel, y_vel, final_class, label, quality)
     headings = _apply_terminal_heading_protection(rows, headings, x_vel, y_vel, final_class, label, quality, video_size)
     return xs, ys, headings, x_vel, y_vel, x_acc, y_acc
+
+
+def smooth_track_and_refine_motion(
+    track_rows: List[Dict[str, Any]],
+    final_class: str,
+    frame_rate: float,
+    logger: logging.Logger,
+    quality: Dict[str, Any],
+    label: str,
+    video_size: Optional[Dict[str, float]] = None,
+) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float]]:
+    """
+    Unified motion post-processing entry. RTS is the default primary path; the
+    legacy Savitzky-Golay pipeline remains the per-track fallback for short,
+    sparse, or numerically unstable tracks.
+    """
+    if not ENABLE_RTS_MOTION_SMOOTHING:
+        return smooth_track_and_refine_motion_savgol(track_rows, final_class, frame_rate, logger, quality, label, video_size)
+
+    rows = sorted(track_rows, key=lambda row: int(row["frame"]))
+    try:
+        xs, ys, headings, x_vel, y_vel, x_acc, y_acc, track_stats = apply_rts_motion_smoothing(
+            rows,
+            final_class,
+            frame_rate,
+            logger,
+            label,
+            video_size,
+        )
+        headings = _apply_initial_heading_protection(rows, headings, x_vel, y_vel, final_class, label, quality)
+        headings = _apply_terminal_heading_protection(rows, headings, x_vel, y_vel, final_class, label, quality, video_size)
+        _record_rts_track_result(quality, final_class, track_stats)
+        if track_stats.get("position_drift_warning"):
+            quality["warnings"].append(
+                "%s RTS position drift warning: p95=%.4f, max=%.4f"
+                % (label, float(track_stats["p95_position_drift"]), float(track_stats["max_position_drift"]))
+            )
+        return xs, ys, headings, x_vel, y_vel, x_acc, y_acc
+    except Exception as exc:
+        reason = str(exc)
+        if not RTS_FALLBACK_TO_SAVGOL:
+            track_stats = _rts_fallback_stats(label, final_class, len(rows), reason, failed=True)
+            track_stats["fallback"] = False
+            _record_rts_track_result(quality, final_class, track_stats)
+            raise
+        logger.warning("%s RTS motion smoothing fallback to Savitzky-Golay: %s", label, reason)
+        _record_rts_track_result(quality, final_class, _rts_fallback_stats(label, final_class, len(rows), reason, failed=True))
+        return smooth_track_and_refine_motion_savgol(track_rows, final_class, frame_rate, logger, quality, label, video_size)
 
 
 def _min_track_frames(final_class: str) -> int:
@@ -2335,6 +3021,38 @@ def _quality_template() -> Dict[str, Any]:
             "shrunk_window_tracks": [],
             "field_delta_summary": {},
         },
+        "rts_motion_smoothing": {
+            "enabled": ENABLE_RTS_MOTION_SMOOTHING,
+            "fallback_to_savgol": RTS_FALLBACK_TO_SAVGOL,
+            "state_model": RTS_STATE_MODEL,
+            "observation_mode": RTS_OBSERVATION_MODE,
+            "gate_mode": RTS_GATE_MODE,
+            "gate_threshold": RTS_GATE_THRESHOLD,
+            "gate_action": RTS_GATE_ACTION,
+            "min_track_frames": RTS_MIN_TRACK_FRAMES,
+            "class_groups": {key: sorted(value) for key, value in RTS_CLASS_GROUPS.items()},
+            "process_noise_jerk_by_group": dict(RTS_PROCESS_NOISE_JERK_BY_GROUP),
+            "position_noise_by_group": dict(RTS_POSITION_NOISE_BY_GROUP),
+            "velocity_noise_by_group": dict(RTS_VELOCITY_NOISE_BY_GROUP),
+            "track_count": 0,
+            "success_track_count": 0,
+            "fallback_track_count": 0,
+            "failed_track_count": 0,
+            "gated_frame_count": 0,
+            "skipped_update_count": 0,
+            "inflated_r_count": 0,
+            "interpolated_observation_count": 0,
+            "low_confidence_observation_count": 0,
+            "position_drift_summary": {
+                "mean_track_mean_position_drift": 0.0,
+                "max_track_p95_position_drift": 0.0,
+                "max_position_drift": 0.0,
+                "warning_track_count": 0,
+                "warning_threshold": RTS_MAX_POSITION_DRIFT_WARN,
+            },
+            "by_class": {},
+            "tracks": [],
+        },
         "bounded_motion_smoothing": {
             "enabled": ENABLE_BOUNDED_MOTION_SMOOTHING,
             "relative_tolerance": BOUNDED_SMOOTHING_REL_TOL,
@@ -2373,6 +3091,27 @@ def _quality_template() -> Dict[str, Any]:
             "boundary_margin_px": TERMINAL_BOUNDARY_MARGIN_PX,
             "confidence_low_threshold": TERMINAL_CONFIDENCE_LOW,
             "speed_drop_ratio": TERMINAL_SPEED_DROP_RATIO,
+            "protected_track_count": 0,
+            "protected_frame_count": 0,
+            "protected_track_labels": set(),
+            "protected_tracks": [],
+        },
+        "initial_heading_protection": {
+            "enabled": ENABLE_INITIAL_HEADING_PROTECTION,
+            "start_frame_max": INITIAL_HEADING_START_FRAME_MAX,
+            "check_frames": INITIAL_HEADING_CHECK_FRAMES,
+            "future_search_start": INITIAL_HEADING_FUTURE_SEARCH_START,
+            "future_search_frames": INITIAL_HEADING_FUTURE_SEARCH_FRAMES,
+            "stable_window": INITIAL_HEADING_STABLE_WINDOW,
+            "anchor_frames": INITIAL_HEADING_ANCHOR_FRAMES,
+            "transition_frames": INITIAL_HEADING_TRANSITION_FRAMES,
+            "min_stable_speed": INITIAL_HEADING_MIN_STABLE_SPEED,
+            "max_stable_deviation_deg": INITIAL_HEADING_MAX_STABLE_DEVIATION_DEG,
+            "max_stable_jump_deg": INITIAL_HEADING_MAX_STABLE_JUMP_DEG,
+            "risk_max_delta_deg": INITIAL_HEADING_RISK_MAX_DELTA_DEG,
+            "risk_spread_deg": INITIAL_HEADING_RISK_SPREAD_DEG,
+            "risk_low_speed": INITIAL_HEADING_RISK_LOW_SPEED,
+            "min_anchor_change_deg": INITIAL_HEADING_MIN_ANCHOR_CHANGE_DEG,
             "protected_track_count": 0,
             "protected_frame_count": 0,
             "protected_track_labels": set(),
@@ -2959,6 +3698,14 @@ def convert_dataset(
     log_line("INFO", f"lane_id_minus_one_records={quality.get('lane_id_minus_one_records', 0)}")
     log_line("INFO", f"missing_ratio_parameters={quality['missing_ratio_parameters']}")
     log_line("INFO", f"heading_parameters={quality['heading_parameters']}")
+    rts_stats = quality["rts_motion_smoothing"]
+    log_line("INFO", f"rts_motion_smoothing_enabled={rts_stats['enabled']}")
+    log_line("INFO", f"rts_motion_observation_mode={rts_stats['observation_mode']}")
+    log_line("INFO", f"rts_motion_success_track_count={rts_stats['success_track_count']}")
+    log_line("INFO", f"rts_motion_fallback_track_count={rts_stats['fallback_track_count']}")
+    log_line("INFO", f"rts_motion_failed_track_count={rts_stats['failed_track_count']}")
+    log_line("INFO", f"rts_motion_gated_frame_count={rts_stats['gated_frame_count']}")
+    log_line("INFO", f"rts_motion_position_drift_summary={rts_stats['position_drift_summary']}")
     log_line("INFO", f"direct_motion_smoothing_enabled={quality['direct_motion_smoothing']['enabled']}")
     log_line("INFO", f"velocity_smooth_window_by_class={quality['direct_motion_smoothing']['velocity_smooth_window_by_class']}")
     log_line("INFO", f"acceleration_smooth_window_by_class={quality['direct_motion_smoothing']['acceleration_smooth_window_by_class']}")
@@ -2968,6 +3715,7 @@ def convert_dataset(
     log_line("INFO", f"direct_motion_shrunk_window_track_count={quality['direct_motion_smoothing']['shrunk_window_track_count']}")
     log_line("INFO", f"direct_motion_field_delta_summary={quality['direct_motion_smoothing']['field_delta_summary']}")
     log_line("INFO", f"bounded_motion_smoothing={quality['bounded_motion_smoothing']}")
+    log_line("INFO", f"initial_heading_protection={quality['initial_heading_protection']}")
     log_line("INFO", f"terminal_heading_protection={quality['terminal_heading_protection']}")
     log_line("INFO", f"short_track_filter_parameters={quality['short_track_filter_parameters']}")
     log_line("INFO", f"raw_track_count={quality['missing_ratio_summary']['raw_track_count']}")

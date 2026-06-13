@@ -28,6 +28,7 @@ import time
 import datetime
 from utils import Config,RoadConfig,isPointinPolygon
 from utils.VideoTool import get_all_video_info,get_srt,splitbase
+from utils.resource_monitor import ResourceMonitor
 
 class DroneVideoProcess:
     def __init__(self,config_json):
@@ -62,6 +63,7 @@ class DroneVideoProcess:
         self.video_start_frame = config_dict.get('video_start_frame',0) # 视频开始帧
         self.video_end_frame = config_dict.get('video_end_frame',0) # 视频结尾截取掉的帧
 
+        self.resource_monitor = ResourceMonitor(config_dict.get('monitor_interval', None))
         self.stabilize_scale = config_dict.get('stabilize_scale', 1)
         self.stabilize_smooth = config_dict.get('stabilize_smooth', 1)
         self.stabilize_translate = config_dict.get('stabilize_translate', 1)
@@ -210,6 +212,12 @@ class DroneVideoProcess:
         print('Process Pipeline:','->'.join(self.pipeline))
         gap = round(fps/self.out_fps)
         print('Frame gap:%d'%gap)
+        print(self.resource_monitor.format(
+            stage="process_start",
+            video=self.video_name,
+            batch_size=self.inference_batch_size,
+            output_dir=self.save_folder,
+        ))
         frame_index = self.video_start_frame
         output_frame = 0
 
@@ -250,12 +258,26 @@ class DroneVideoProcess:
                             cv2.imwrite(first_frame_name, frame)
                     if frame_index%gap==0:
 
-                        self._process_img(frame,output_frame,frame_index,srt_info_ls,self.save_folder)
+                        frame_stats = self._process_img(frame,output_frame,frame_index,srt_info_ls,self.save_folder)
                         output_frame += 1
                         e_time = time.time()
                         remain_time = (e_time - s_time) * (all_num_frame//gap - output_frame - 1)
-                        process_fps = 1/(e_time-s_time)
+                        process_fps = 1/max(e_time-s_time, 1e-9)
                         print('\rvideo index:%d,process frame:%d/%d,current video:%d/%d, FPS:%.1f, remain time:%.2f min'%(video_index,frame_index,all_num_frame-self.video_end_frame,current_video_frame,valid_frames,process_fps,remain_time/60),end="",flush=True)
+                        if self.resource_monitor.should_log():
+                            print()
+                            print(self.resource_monitor.format(
+                                stage="process_progress",
+                                video=self.video_name,
+                                frame=frame_index,
+                                output_frame=output_frame,
+                                batch_size=self.inference_batch_size,
+                                tiles=frame_stats.get("tiles"),
+                                fps=round(process_fps, 3),
+                                total_sec=round(frame_stats.get("total_sec", 0.0), 3),
+                                detect_sec=round(frame_stats.get("detect_sec", 0.0), 3),
+                                output=self.writer_path or self.save_folder,
+                            ))
                         s_time = e_time
                     video_frame_index += 1
                     frame_index += 1
@@ -277,6 +299,11 @@ class DroneVideoProcess:
                 self.video_writer.release()
             if completed:
                 self._save_det_bbox(self.save_folder)
+                print(self.resource_monitor.format(
+                    stage="process_done",
+                    video=self.video_name,
+                    output=self.writer_path or self.save_folder,
+                ))
                 print('save video')
 
 
@@ -506,6 +533,14 @@ class DroneVideoProcess:
             self.det_bbox_result['traj_info'].append((frame_index,output_frame, o_bboxs_res,frame_time))#轨迹信息
             self.det_bbox_result['raw_det'].append((frame_index, output_frame, det_raw,frame_time))#原始检测结果
         t5 = time.time()
+        return {
+            "tiles": len(sub_imgs),
+            "stabilize_split_sec": t2 - t1,
+            "detect_sec": t3 - t2,
+            "post_sec": t4 - t3,
+            "write_sec": t5 - t4,
+            "total_sec": t5 - t1,
+        }
 
     def _save_det_bbox(self,save_file_folder):
         if save_file_folder is None:
@@ -633,9 +668,9 @@ class DroneVideoProcess:
                 pts_for_len = nms_result[:, -8:].reshape(-1, 4, 2)
         else:
             pts_for_len = pts_px
-        dif = pts_for_len[:, :, None, :] - pts_for_len[:, None, :, :]
-        dist = np.sqrt((dif ** 2).sum(-1))
-        lengths = dist.max(axis=(1, 2))
+        edge_vectors = pts_for_len - np.roll(pts_for_len, shift=-1, axis=1)
+        edge_lengths = np.sqrt((edge_vectors ** 2).sum(-1))
+        lengths = edge_lengths.max(axis=1)
         if (not use_world) and self.length_per_pixel:
             lengths = lengths * float(self.length_per_pixel)
         return lengths

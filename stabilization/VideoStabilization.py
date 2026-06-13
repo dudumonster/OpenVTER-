@@ -42,22 +42,8 @@ class VideoStabilization:
     def _get_transform(self, prev_frame_gray, curr_gray, prev_pts):
         # 仿射变换
         # 6参数。三个点计算放射矩阵。
-        if len(prev_pts)>=3:
-            curr_pts, status, err = cv2.calcOpticalFlowPyrLK(prev_frame_gray, curr_gray, prev_pts, None)
-            assert prev_pts.shape == curr_pts.shape
-            idx = np.where(status == 1)[0]
-            prev_pts = prev_pts[idx]
-            curr_pts = curr_pts[idx]
-            affine_matrix, inlier = cv2.estimateAffinePartial2D(curr_pts, prev_pts)
-            affine_matrix_pre2curr, inlier = cv2.estimateAffinePartial2D(prev_pts, curr_pts)
-            # Extract traslation
-            dx = affine_matrix[0, 2]
-            dy = affine_matrix[1, 2]
-            # Extract rotation angle
-            da = np.arctan2(affine_matrix[1, 0], affine_matrix[0, 0])
-            return [dx, dy, da], affine_matrix,affine_matrix_pre2curr
-        else:
-            print('Warning! Not enough key points, prev_pts<3 !')
+        def default_transform(message):
+            print(message)
             dx = 0
             dy = 0
             da = 0
@@ -69,6 +55,34 @@ class VideoStabilization:
             default_m[0, 2] = dx
             default_m[1, 2] = dy
             return [dx, dy, da], default_m, default_m
+
+        if prev_pts is None or len(prev_pts) < 3:
+            return default_transform('Warning! Not enough key points, prev_pts<3 !')
+
+        curr_pts, status, err = cv2.calcOpticalFlowPyrLK(prev_frame_gray, curr_gray, prev_pts, None)
+        if curr_pts is None or status is None:
+            return default_transform('Warning! Optical flow failed, use default transform !')
+
+        if prev_pts.shape != curr_pts.shape:
+            return default_transform('Warning! Optical flow point shape mismatch, use default transform !')
+
+        idx = np.where(status == 1)[0]
+        prev_pts = prev_pts[idx]
+        curr_pts = curr_pts[idx]
+        if len(prev_pts) < 3:
+            return default_transform('Warning! Not enough tracked key points, prev_pts<3 !')
+
+        affine_matrix, inlier = cv2.estimateAffinePartial2D(curr_pts, prev_pts)
+        affine_matrix_pre2curr, inlier = cv2.estimateAffinePartial2D(prev_pts, curr_pts)
+        if affine_matrix is None or affine_matrix_pre2curr is None:
+            return default_transform('Warning! Affine estimation failed, use default transform !')
+
+        # Extract traslation
+        dx = affine_matrix[0, 2]
+        dy = affine_matrix[1, 2]
+        # Extract rotation angle
+        da = np.arctan2(affine_matrix[1, 0], affine_matrix[0, 0])
+        return [dx, dy, da], affine_matrix,affine_matrix_pre2curr
 
 
         # affine_image = cv2.warpAffine(frame, affine_matrix, (self.cols,self.rows))

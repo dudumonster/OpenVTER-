@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import logging
 import math
@@ -24,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.train import load_config, run_config
 from utils import RoadConfig
+from utils.resource_monitor import ResourceMonitor, configure_runtime_threads
 
 
 VIDEO_SUFFIXES = {".mp4", ".MP4", ".mov", ".MOV", ".avi", ".AVI", ".mkv", ".MKV"}
@@ -265,9 +267,12 @@ def _append_status(status_path: Path, payload: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    faulthandler.enable()
     args = parse_args()
     config_path = _resolve_config_path(args.config)
     base_config = load_config(config_path)
+    thread_status = configure_runtime_threads(base_config.get("cpu_threads"))
+    monitor = ResourceMonitor(base_config.get("monitor_interval"))
     selected_range = _parse_video_range(args.video_range)
 
     scene_dir = Path(args.scene_dir).expanduser()
@@ -292,6 +297,8 @@ def main() -> None:
     logger.info("Scene output   : %s", scene_output_dir)
     logger.info("Scene log file : %s", log_path)
     logger.info("Status file    : %s", status_path)
+    logger.info("Runtime threads: %s", thread_status)
+    logger.info("%s", monitor.format(stage="scene_start"))
     if args.video:
         logger.info("Single-video mode enabled for: %s", args.video)
     if selected_range:
@@ -348,6 +355,7 @@ def main() -> None:
         logger.info("[%d/%d] Start video: %s", index, len(video_files), video_path.name)
         logger.info("           Road config : %s", road_config_path)
         logger.info("           Output dir  : %s", expected_outputs["video_output_dir"])
+        logger.info("%s", monitor.format(stage="video_start", video=video_path.name))
         _append_status(
             status_path,
             {
@@ -366,6 +374,7 @@ def main() -> None:
         except Exception as exc:
             failed += 1
             logger.exception("[%d/%d] Failed video: %s", index, len(video_files), video_path.name)
+            logger.info("%s", monitor.format(stage="video_failed", video=video_path.name))
             _append_status(
                 status_path,
                 {
@@ -382,6 +391,7 @@ def main() -> None:
         if _is_video_complete(expected_outputs):
             processed += 1
             logger.info("[%d/%d] Completed video: %s", index, len(video_files), video_path.name)
+            logger.info("%s", monitor.format(stage="video_done", video=video_path.name))
             _append_status(
                 status_path,
                 {
@@ -422,6 +432,9 @@ def main() -> None:
         skipped,
         failed,
     )
+    logger.info("%s", monitor.format(stage="scene_end"))
+    if failed > 0:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -15,13 +15,13 @@
 #     --video-range 001-005
 
 #SBATCH --job-name=openvter_scene
-#SBATCH --output=logs/server39/slurm/scene-%j.out
-#SBATCH --error=logs/server39/slurm/scene-%j.err
-#SBATCH --partition=gpu
+#SBATCH --output=logs/scene-%j.out
+#SBATCH --error=logs/scene-%j.err
+#SBATCH --partition=normal
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=24:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+#SBATCH --time=72:00:00
 
 set -euo pipefail
 
@@ -34,6 +34,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${PROJECT_ROOT}"
+mkdir -p logs/server39/slurm
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate server39

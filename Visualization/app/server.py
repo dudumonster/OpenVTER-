@@ -116,6 +116,29 @@ def _missing_standard_files(dataset_dir: Path):
     return [path.name for key, path in paths.items() if key != "quality" and not path.exists()]
 
 
+def _standard_dataset_summary_light(dataset_dir: Path):
+    """Lightweight dataset-list item: only check folder/name and required files."""
+    missing_files = _missing_standard_files(dataset_dir)
+    is_available = not missing_files
+    return {
+        "dataset_id": dataset_dir.name,
+        "version": "final",
+        "display_name": dataset_dir.name,
+        "row_count": "",
+        "object_count": None,
+        "full_object_count": None,
+        "filtered_object_count": None,
+        "total_frames": None,
+        "fps": None,
+        "class_names": [],
+        "converted_time": None,
+        "warning_count": len(missing_files),
+        "source_type": "final_data" if is_available else "missing_final_data",
+        "is_available": is_available,
+        "missing_files": missing_files,
+    }
+
+
 def _is_legacy_dataset(dataset_dir: Path) -> bool:
     return (dataset_dir / "metadata.json").exists()
 
@@ -692,48 +715,7 @@ class VisualizerHandler(BaseHTTPRequestHandler):
         for dataset_dir in sorted(DEFAULT_FINAL_ROOT.iterdir()):
             if not dataset_dir.is_dir():
                 continue
-            missing_files = _missing_standard_files(dataset_dir)
-            if missing_files:
-                converted.append(
-                    {
-                        "dataset_id": dataset_dir.name,
-                        "version": "final",
-                        "display_name": dataset_dir.name,
-                        "row_count": "",
-                        "object_count": 0,
-                        "full_object_count": 0,
-                        "filtered_object_count": 0,
-                        "total_frames": 0,
-                        "fps": None,
-                        "class_names": [],
-                        "converted_time": None,
-                        "warning_count": len(missing_files),
-                        "source_type": "missing_final_data",
-                        "is_available": False,
-                        "missing_files": missing_files,
-                    }
-                )
-                continue
-            metadata = _standard_metadata(dataset_dir.name, "final", dataset_dir)
-            converted.append(
-                {
-                    "dataset_id": dataset_dir.name,
-                    "version": "final",
-                    "display_name": metadata.get("display_name", dataset_dir.name),
-                    "row_count": metadata.get("row_count"),
-                    "object_count": metadata.get("object_count"),
-                    "full_object_count": metadata.get("full_object_count"),
-                    "filtered_object_count": metadata.get("filtered_object_count"),
-                    "total_frames": metadata.get("total_frames"),
-                    "fps": metadata.get("fps"),
-                    "class_names": metadata.get("class_names", []),
-                    "converted_time": metadata.get("converted_time"),
-                    "warning_count": len(metadata.get("warnings", [])),
-                    "source_type": "final_data",
-                    "is_available": True,
-                    "missing_files": [],
-                }
-            )
+            converted.append(_standard_dataset_summary_light(dataset_dir))
 
         initial = []
         for source_dir in sorted(DEFAULT_INITIAL_ROOT.iterdir()):
@@ -741,7 +723,7 @@ class VisualizerHandler(BaseHTTPRequestHandler):
                 initial.append(
                     {
                         "dataset_id": source_dir.name,
-                        "has_pkl": any(source_dir.glob("*.pkl")),
+                        "has_pkl": None,
                         "converted": _is_standard_dataset(DEFAULT_FINAL_ROOT / source_dir.name),
                     }
                 )

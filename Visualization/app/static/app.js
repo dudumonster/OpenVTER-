@@ -136,13 +136,14 @@ async function loadDatasets() {
   state.datasets = payload.converted || [];
   renderDatasets();
   const firstAvailable = state.datasets.find((item) => item.is_available !== false);
-  if (!state.datasetId && firstAvailable) {
-    await loadDataset(firstAvailable.dataset_id, firstAvailable.version);
-  } else if (!state.datasets.length) {
+  if (!state.datasets.length) {
     els.datasetSummary.textContent = "没有已转换数据集";
     els.emptyState.classList.remove("hidden");
   } else if (!firstAvailable) {
     els.datasetSummary.textContent = "Final Data 缺少必要 CSV";
+    els.emptyState.classList.remove("hidden");
+  } else if (!state.datasetId) {
+    els.datasetSummary.textContent = "请选择数据集";
     els.emptyState.classList.remove("hidden");
   }
 }
@@ -168,10 +169,11 @@ function renderDatasets() {
     const active = item.dataset_id === state.datasetId && item.version === state.version;
     btn.className = `dataset-item ${active ? "active" : ""}`;
     btn.disabled = item.is_available === false;
+    const metaText = item.is_available === false ? "不可用" : "可用";
     btn.innerHTML = `
       <div class="dataset-name">${escapeHtml(item.dataset_id)}</div>
       <div class="dataset-version">${escapeHtml(item.version)}</div>
-      <div class="dataset-meta">${item.total_frames || 0} 帧 · ${item.object_count || 0} 目标 · ${item.row_count || 0} 行</div>
+      <div class="dataset-meta">${metaText}</div>
       ${item.is_available === false ? `<div class="dataset-meta">缺少 ${escapeHtml((item.missing_files || []).join(", "))}</div>` : ""}
     `;
     btn.addEventListener("click", () => {

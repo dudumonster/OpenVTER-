@@ -258,6 +258,70 @@ button:hover {
   overflow-wrap: anywhere;
 }
 
+.class-stats-total {
+  margin-bottom: 8px;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.class-stats-list {
+  display: grid;
+  gap: 8px;
+}
+
+.class-stat-row {
+  min-width: 0;
+}
+
+.class-stat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: #344054;
+  font-size: 12px;
+}
+
+.class-stat-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.class-stat-name span:last-child {
+  min-width: 0;
+}
+
+.class-stat-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+}
+
+.class-stat-value {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.class-stat-track {
+  height: 6px;
+  overflow: hidden;
+  background: #eef2f6;
+  border: 1px solid #e4e9f2;
+}
+
+.class-stat-fill {
+  height: 100%;
+  min-width: 2px;
+}
+
 .canvas-toolbar {
   justify-content: space-between;
   min-height: 52px;

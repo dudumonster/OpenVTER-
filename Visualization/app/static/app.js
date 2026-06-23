@@ -87,6 +87,8 @@ const els = {
   clearAllClasses: document.getElementById("clearAllClasses"),
   classSelectState: document.getElementById("classSelectState"),
   classFilters: document.getElementById("classFilters"),
+  classStatsTotal: document.getElementById("classStatsTotal"),
+  classStatsList: document.getElementById("classStatsList"),
   bboxToggle: document.getElementById("bboxToggle"),
   labelToggle: document.getElementById("labelToggle"),
   laneToggle: document.getElementById("laneToggle"),
@@ -137,14 +139,20 @@ async function loadDatasets() {
   renderDatasets();
   const firstAvailable = state.datasets.find((item) => item.is_available !== false);
   if (!state.datasets.length) {
+    state.objects = [];
     els.datasetSummary.textContent = "没有已转换数据集";
     els.emptyState.classList.remove("hidden");
+    renderClassStats();
   } else if (!firstAvailable) {
+    state.objects = [];
     els.datasetSummary.textContent = "Final Data 缺少必要 CSV";
     els.emptyState.classList.remove("hidden");
+    renderClassStats();
   } else if (!state.datasetId) {
+    state.objects = [];
     els.datasetSummary.textContent = "请选择数据集";
     els.emptyState.classList.remove("hidden");
+    renderClassStats();
   }
 }
 
@@ -187,6 +195,8 @@ async function loadDataset(datasetId, version) {
   setStatus("读取数据中...");
   state.datasetId = datasetId;
   state.version = version;
+  state.objects = [];
+  renderClassStats();
   state.metadata = await api(`/api/datasets/${encodeURIComponent(datasetId)}/${encodeURIComponent(version)}/metadata`);
   const [tracks, frames, objects, lanes] = await Promise.all([
     api(`/api/datasets/${encodeURIComponent(datasetId)}/${encodeURIComponent(version)}/tracks`),
@@ -214,6 +224,7 @@ async function loadDataset(datasetId, version) {
   renderDatasets();
   buildClassFilters();
   renderLegend();
+  renderClassStats();
   await loadBackground(datasetId, version);
 
   state.currentFrame = state.minFrame;
@@ -382,6 +393,51 @@ function setAllClasses(selected) {
   state.selectedClasses = selected ? new Set(state.classNames) : new Set();
   updateClassSelectState();
   draw();
+}
+
+function computeClassStats() {
+  const counts = new Map();
+  for (const obj of state.objects) {
+    const className = obj.class_name || "unknown";
+    counts.set(className, (counts.get(className) || 0) + 1);
+  }
+  const total = state.objects.length;
+  return Array.from(counts.entries())
+    .map(([className, count]) => ({
+      className,
+      count,
+      percent: total ? (count / total) * 100 : 0,
+    }))
+    .sort((a, b) => b.count - a.count || a.className.localeCompare(b.className));
+}
+
+function renderClassStats() {
+  const total = state.objects.length;
+  els.classStatsList.innerHTML = "";
+  if (!total) {
+    els.classStatsTotal.textContent = state.datasetId ? "当前数据集没有目标" : "未加载数据集";
+    return;
+  }
+
+  els.classStatsTotal.textContent = `总目标 ${total}`;
+  for (const item of computeClassStats()) {
+    const style = styleFor(item.className);
+    const row = document.createElement("div");
+    row.className = "class-stat-row";
+    row.innerHTML = `
+      <div class="class-stat-head">
+        <span class="class-stat-name">
+          <span class="class-stat-dot" style="background:${style.color}"></span>
+          <span>${escapeHtml(item.className)}</span>
+        </span>
+        <span class="class-stat-value">${item.count} · ${item.percent.toFixed(1)}%</span>
+      </div>
+      <div class="class-stat-track">
+        <div class="class-stat-fill" style="width:${Math.max(0, Math.min(100, item.percent))}%; background:${style.color}"></div>
+      </div>
+    `;
+    els.classStatsList.appendChild(row);
+  }
 }
 
 function renderLegend() {
@@ -1139,6 +1195,7 @@ window.addEventListener("resize", resizeCanvas);
 syncTrailLength(DEFAULT_TRAIL_LENGTH, false);
 loadDatasets().catch((err) => {
   setStatus("读取失败");
+  renderClassStats();
   els.scanResult.textContent = String(err.message || err);
 });
 requestAnimationFrame(tick);

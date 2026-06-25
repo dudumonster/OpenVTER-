@@ -89,6 +89,9 @@ const els = {
   classFilters: document.getElementById("classFilters"),
   classStatsTotal: document.getElementById("classStatsTotal"),
   classStatsList: document.getElementById("classStatsList"),
+  dimensionSummary: document.getElementById("dimensionSummary"),
+  lengthDistributionLayers: document.getElementById("lengthDistributionLayers"),
+  dimensionTableBody: document.getElementById("dimensionTableBody"),
   bboxToggle: document.getElementById("bboxToggle"),
   labelToggle: document.getElementById("labelToggle"),
   laneToggle: document.getElementById("laneToggle"),
@@ -143,16 +146,19 @@ async function loadDatasets() {
     els.datasetSummary.textContent = "没有已转换数据集";
     els.emptyState.classList.remove("hidden");
     renderClassStats();
+    renderDimensionAnalysis();
   } else if (!firstAvailable) {
     state.objects = [];
     els.datasetSummary.textContent = "Final Data 缺少必要 CSV";
     els.emptyState.classList.remove("hidden");
     renderClassStats();
+    renderDimensionAnalysis();
   } else if (!state.datasetId) {
     state.objects = [];
     els.datasetSummary.textContent = "请选择数据集";
     els.emptyState.classList.remove("hidden");
     renderClassStats();
+    renderDimensionAnalysis();
   }
 }
 
@@ -197,6 +203,7 @@ async function loadDataset(datasetId, version) {
   state.version = version;
   state.objects = [];
   renderClassStats();
+  renderDimensionAnalysis();
   state.metadata = await api(`/api/datasets/${encodeURIComponent(datasetId)}/${encodeURIComponent(version)}/metadata`);
   const [tracks, frames, objects, lanes] = await Promise.all([
     api(`/api/datasets/${encodeURIComponent(datasetId)}/${encodeURIComponent(version)}/tracks`),
@@ -225,6 +232,7 @@ async function loadDataset(datasetId, version) {
   buildClassFilters();
   renderLegend();
   renderClassStats();
+  renderDimensionAnalysis();
   await loadBackground(datasetId, version);
 
   state.currentFrame = state.minFrame;
@@ -253,6 +261,9 @@ function normalizeTrack(row) {
     frame_id: frameId,
     object_id: objectId,
     raw_object_id: asNumber(row.raw_object_id),
+    width: asNumber(row.width),
+    length: asNumber(row.length),
+    total_frames: asNumber(row.total_frames),
     confidence: asNumber(row.confidence),
     x1: asNumber(row.x1),
     y1: asNumber(row.y1),
@@ -437,6 +448,138 @@ function renderClassStats() {
       </div>
     `;
     els.classStatsList.appendChild(row);
+  }
+}
+
+function renderDimensionAnalysis() {
+  if (!els.dimensionSummary || !els.dimensionTableBody || !els.lengthDistributionLayers) return;
+  const dimensions = state.objects
+    .filter((obj) => Number.isFinite(obj.length) || Number.isFinite(obj.width))
+    .sort((a, b) => (a.object_id ?? Infinity) - (b.object_id ?? Infinity));
+  const analysis = window.DimensionAnalysis.buildVehicleLengthDistribution(state.objects);
+  if (!state.datasetId) {
+    els.dimensionSummary.textContent = "未加载数据集";
+  } else if (!analysis.total_count) {
+    els.dimensionSummary.textContent = "当前数据集没有可统计的车辆长度";
+  } else if (analysis.car_count) {
+    els.dimensionSummary.textContent = `车辆 ${analysis.total_count} 辆 · car ${analysis.car_reference_min.toFixed(1)}–${analysis.car_reference_max.toFixed(1)} m：${analysis.car_reference_count}/${analysis.car_count} 辆（${fmt(analysis.car_reference_ratio * 100, 1)}%） · ${analysis.bin_width.toFixed(1)} m分箱`;
+  } else {
+    els.dimensionSummary.textContent = `车辆 ${analysis.total_count} 辆 · 当前无 car · ${analysis.bin_width.toFixed(1)} m分箱`;
+  }
+
+  els.lengthDistributionLayers.innerHTML = "";
+  for (const group of analysis.groups) {
+    const layer = document.createElement("div");
+    layer.className = "length-distribution-layer";
+    const header = document.createElement("div");
+    header.className = "length-distribution-header";
+    const overflowText = group.overflow_count ? ` · >${analysis.axis_max} m：${group.overflow_count} 辆` : "";
+    header.innerHTML = `<strong>${escapeHtml(group.class_name)}</strong><span>${group.count} 辆 · 峰值 ${group.peak_label}：${group.peak_count} 辆${overflowText}</span>`;
+    const canvas = document.createElement("canvas");
+    canvas.className = "class-length-histogram";
+    canvas.setAttribute("aria-label", `${group.class_name}车辆长度分布，共${group.count}辆`);
+    layer.append(header, canvas);
+    els.lengthDistributionLayers.appendChild(layer);
+    drawClassLengthHistogram(canvas, group, analysis);
+  }
+
+  els.dimensionTableBody.innerHTML = "";
+  for (const obj of dimensions) {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${obj.object_id === null ? "" : obj.object_id}</td>
+      <td>${escapeHtml(obj.class_name || "unknown")}</td>
+      <td>${fmt(obj.length, 3)}</td>
+      <td>${fmt(obj.width, 3)}</td>
+    `;
+    els.dimensionTableBody.appendChild(row);
+  }
+}
+
+function drawClassLengthHistogram(canvas, group, analysis) {
+  const cssWidth = Math.max(canvas.clientWidth || 300, 220);
+  const cssHeight = 116;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssWidth * ratio);
+  canvas.height = Math.round(cssHeight * ratio);
+  const chart = canvas.getContext("2d");
+  chart.setTransform(ratio, 0, 0, ratio, 0, 0);
+  chart.clearRect(0, 0, cssWidth, cssHeight);
+  chart.fillStyle = "#ffffff";
+  chart.fillRect(0, 0, cssWidth, cssHeight);
+  const margin = { left: 24, right: 8, top: 14, bottom: 26 };
+  const plotWidth = cssWidth - margin.left - margin.right;
+  const plotHeight = cssHeight - margin.top - margin.bottom;
+  const overflowWidth = 28;
+  const regularPlotWidth = plotWidth - overflowWidth;
+  const slot = regularPlotWidth / group.counts.length;
+  const maxCount = Math.max(...group.counts, group.overflow_count, 1);
+  let carReferenceX = null;
+
+  if (group.class_name === "car") {
+    const referenceStart = margin.left + (analysis.car_reference_min / analysis.axis_max) * regularPlotWidth;
+    const referenceEnd = margin.left + (analysis.car_reference_max / analysis.axis_max) * regularPlotWidth;
+    carReferenceX = margin.left + (analysis.car_reference_value / analysis.axis_max) * regularPlotWidth;
+    chart.fillStyle = "rgba(34, 197, 94, 0.16)";
+    chart.fillRect(referenceStart, margin.top, Math.max(2, referenceEnd - referenceStart), plotHeight);
+    chart.strokeStyle = "#16a34a";
+    chart.lineWidth = 1.5;
+    chart.beginPath();
+    chart.moveTo(carReferenceX, margin.top);
+    chart.lineTo(carReferenceX, margin.top + plotHeight);
+    chart.stroke();
+  }
+
+  chart.strokeStyle = "#d0d5dd";
+  chart.lineWidth = 1;
+  chart.beginPath();
+  chart.moveTo(margin.left, margin.top);
+  chart.lineTo(margin.left, margin.top + plotHeight);
+  chart.lineTo(margin.left + plotWidth, margin.top + plotHeight);
+  chart.stroke();
+
+  const color = styleFor(group.class_name).color;
+  group.counts.forEach((count, index) => {
+    const height = (count / maxCount) * (plotHeight - 4);
+    const x = margin.left + index * slot + 1;
+    const y = margin.top + plotHeight - height;
+    chart.fillStyle = color;
+    chart.fillRect(x, y, Math.max(1, slot - 2), height);
+    if (count > 0) {
+      chart.fillStyle = "#344054";
+      chart.font = "8px Segoe UI, Arial";
+      chart.textAlign = "center";
+      chart.fillText(String(count), x + Math.max(1, slot - 2) / 2, Math.max(margin.top + 8, y - 2));
+    }
+  });
+
+  const overflowX = margin.left + regularPlotWidth + 4;
+  const overflowBarWidth = Math.max(4, overflowWidth - 8);
+  const overflowHeight = (group.overflow_count / maxCount) * (plotHeight - 4);
+  if (group.overflow_count) {
+    chart.fillStyle = "#dc2626";
+    chart.fillRect(overflowX, margin.top + plotHeight - overflowHeight, overflowBarWidth, overflowHeight);
+    chart.fillStyle = "#991b1b";
+    chart.font = "8px Segoe UI, Arial";
+    chart.textAlign = "center";
+    chart.fillText(String(group.overflow_count), overflowX + overflowBarWidth / 2, Math.max(margin.top + 8, margin.top + plotHeight - overflowHeight - 2));
+  }
+
+  chart.fillStyle = "#667085";
+  chart.font = "9px Segoe UI, Arial";
+  for (let value = 0; value <= analysis.axis_max; value += 3) {
+    const x = margin.left + (value / analysis.axis_max) * regularPlotWidth;
+    chart.textAlign = value === analysis.axis_max ? "right" : value === 0 ? "left" : "center";
+    chart.fillText(String(value), x, cssHeight - 9);
+  }
+  chart.textAlign = "center";
+  chart.fillStyle = group.overflow_count ? "#991b1b" : "#667085";
+  chart.fillText(`>${analysis.axis_max}`, overflowX + overflowBarWidth / 2, cssHeight - 9);
+  if (carReferenceX !== null) {
+    chart.fillStyle = "#15803d";
+    chart.font = "9px Segoe UI, Arial";
+    chart.textAlign = "center";
+    chart.fillText("4.3", carReferenceX, margin.top + plotHeight + 10);
   }
 }
 
@@ -1055,6 +1198,8 @@ function showObjectDetail(row) {
       <span>object_id</span><strong>${row.object_id}</strong>
       <span>raw_object_id</span><strong>${row.raw_object_id === null ? "" : row.raw_object_id}</strong>
       <span>class</span><strong>${escapeHtml(row.class_name || "")}</strong>
+      <span>length</span><strong>${fmt(obj.length, 3)} m</strong>
+      <span>width</span><strong>${fmt(obj.width, 3)} m</strong>
       <span>frame</span><strong>${row.frame_id}</strong>
       <span>lane_id</span><strong>${row.lane_id === null ? "" : row.lane_id}</strong>
       <span>center</span><strong>${fmt(row.cx)}, ${fmt(row.cy)}</strong>
@@ -1074,8 +1219,10 @@ function showTooltip(row, clientX, clientY) {
     return;
   }
   els.tooltip.classList.remove("lane-tooltip");
+  const obj = state.objectInfoMap.get(row.object_id) || {};
   els.tooltip.innerHTML = `
     <strong>${row.object_id}</strong> ${escapeHtml(row.class_name || "")}<br>
+    length × width: ${fmt(obj.length, 2)} × ${fmt(obj.width, 2)} m<br>
     frame: ${row.frame_id}<br>
     lane_id: ${row.lane_id === null ? "" : row.lane_id}<br>
     center: ${fmt(row.cx)}, ${fmt(row.cy)}<br>
@@ -1190,7 +1337,10 @@ els.canvas.addEventListener("click", (event) => {
   showObjectDetail(hit);
 });
 
-window.addEventListener("resize", resizeCanvas);
+window.addEventListener("resize", () => {
+  resizeCanvas();
+  renderDimensionAnalysis();
+});
 
 syncTrailLength(DEFAULT_TRAIL_LENGTH, false);
 loadDatasets().catch((err) => {

@@ -304,6 +304,13 @@ STATIC_GATE = {
     "filter_classes": sorted(STATIC_VEHICLE_CLASSES),
 }
 
+IMPLAUSIBLE_CAR_DIMENSIONS = {
+    "class": "car",
+    "min_length": 3.0,
+    "min_width": 1.2,
+    "filter_reason": "implausible_car_dimensions",
+}
+
 LIGHT_VRU_STATIC_GATE = {
     "motor": {
         "min_track_length": 60,
@@ -3267,7 +3274,7 @@ def _moving_filtered_tracks(
     tracks_meta: List[Dict[str, Any]],
     tracks_rows: List[Dict[str, Any]],
     frame_rate: float,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
     rows_by_track: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for row in tracks_rows:
         rows_by_track[int(row["trackId"])].append(row)
@@ -3276,7 +3283,32 @@ def _moving_filtered_tracks(
         int(meta["trackId"]): _track_motion_metrics(meta, rows_by_track.get(int(meta["trackId"]), []), frame_rate)
         for meta in tracks_meta
     }
-    filtered_ids = {track_id for track_id, metrics in metrics_by_track.items() if metrics["is_static"]}
+    static_filtered_ids = {track_id for track_id, metrics in metrics_by_track.items() if metrics["is_static"]}
+    dimension_metrics_by_track: Dict[int, Dict[str, Any]] = {}
+    for meta in tracks_meta:
+        if meta.get("class") != IMPLAUSIBLE_CAR_DIMENSIONS["class"]:
+            continue
+        length = float(meta["length"])
+        width = float(meta["width"])
+        reasons = []
+        if length < float(IMPLAUSIBLE_CAR_DIMENSIONS["min_length"]):
+            reasons.append("length_below_%.2fm" % float(IMPLAUSIBLE_CAR_DIMENSIONS["min_length"]))
+        if width < float(IMPLAUSIBLE_CAR_DIMENSIONS["min_width"]):
+            reasons.append("width_below_%.2fm" % float(IMPLAUSIBLE_CAR_DIMENSIONS["min_width"]))
+        if not reasons:
+            continue
+        track_id = int(meta["trackId"])
+        dimension_metrics_by_track[track_id] = {
+            "trackId": track_id,
+            "raw_object_id": int(meta.get("raw_object_id", track_id)),
+            "class": meta["class"],
+            "width": width,
+            "length": length,
+            "filter_reason": IMPLAUSIBLE_CAR_DIMENSIONS["filter_reason"],
+            "signals": reasons,
+        }
+    dimension_filtered_ids = set(dimension_metrics_by_track)
+    filtered_ids = static_filtered_ids | dimension_filtered_ids
     kept_meta_old = [meta for meta in tracks_meta if int(meta["trackId"]) not in filtered_ids]
     kept_meta_old.sort(key=lambda item: (int(item["initialFrame"]), int(item.get("raw_object_id", item["trackId"]))))
     id_map = {int(meta["trackId"]): new_id for new_id, meta in enumerate(kept_meta_old, start=1)}
@@ -3302,12 +3334,19 @@ def _moving_filtered_tracks(
         "light_vru_parameters": LIGHT_VRU_STATIC_GATE,
         "vru_parameters": VRU_STATIC_GATE,
         "original_track_count": len(tracks_meta),
-        "filtered_track_count": len(filtered_ids),
-        "kept_track_count": len(filtered_meta),
-        "filtered_tracks": [metrics_by_track[track_id] for track_id in sorted(filtered_ids)],
+        "filtered_track_count": len(static_filtered_ids),
+        "kept_track_count": len(tracks_meta) - len(static_filtered_ids),
+        "filtered_tracks": [metrics_by_track[track_id] for track_id in sorted(static_filtered_ids)],
         "all_track_metrics": [metrics_by_track[track_id] for track_id in sorted(metrics_by_track)],
     }
-    return filtered_meta, filtered_rows, gate_report
+    dimension_report = {
+        "parameters": dict(IMPLAUSIBLE_CAR_DIMENSIONS),
+        "original_track_count": len(tracks_meta),
+        "filtered_track_count": len(dimension_filtered_ids),
+        "kept_track_count": len(tracks_meta) - len(dimension_filtered_ids),
+        "filtered_tracks": [dimension_metrics_by_track[track_id] for track_id in sorted(dimension_filtered_ids)],
+    }
+    return filtered_meta, filtered_rows, gate_report, dimension_report
 
 
 def _apply_fragmentation_filter(
@@ -3378,6 +3417,24 @@ def _static_filter_info_by_raw(static_gate_report: Dict[str, Any]) -> Dict[int, 
         info[raw_id] = {
             "filter_type": "static_gate",
             "filter_reason": item.get("filter_reason") or "stationary_track",
+            "fragmentation_group_id": "",
+            "related_raw_object_ids": "",
+            "fragmentation_score": "",
+        }
+    return info
+
+
+def _implausible_car_filter_info_by_raw(dimension_report: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    info: Dict[int, Dict[str, Any]] = {}
+    for item in dimension_report.get("filtered_tracks", []):
+        raw_id = int(item.get("raw_object_id", item.get("trackId")))
+        signals = item.get("signals", [])
+        reason = item.get("filter_reason") or IMPLAUSIBLE_CAR_DIMENSIONS["filter_reason"]
+        if signals:
+            reason = reason + ":" + ",".join(str(signal) for signal in signals)
+        info[raw_id] = {
+            "filter_type": "dimension_gate",
+            "filter_reason": reason,
             "fragmentation_group_id": "",
             "related_raw_object_ids": "",
             "fragmentation_score": "",
@@ -3490,6 +3547,9 @@ def _write_dataset_version(
         "filtered_track_count": max(len(id_mapping_rows) - len(tracks_meta), 0),
         "fragmentation_filtered_count": report.get("fragmentationFilter", {}).get("filtered_track_count", 0),
         "static_filtered_count": report.get("staticGate", {}).get("filtered_track_count", 0) if report.get("version") == "moving_filtered" else 0,
+        "implausible_car_dimension_filtered_count": report.get("implausibleCarDimensions", {}).get("filtered_track_count", 0)
+        if report.get("version") == "moving_filtered"
+        else 0,
         "id_mapping_file": "id_mapping.csv",
         "filter_report_file": "filter_report.csv",
     }
@@ -3613,7 +3673,9 @@ def convert_dataset(
     full_raw_ids = {int(meta.get("raw_object_id", meta["trackId"])) for meta in tracks_meta}
     fragmentation_report = _detect_fragmentation_groups(raw_stats_by_id, full_raw_ids, video_info)
     fragmentation_meta, fragmentation_rows = _apply_fragmentation_filter(tracks_meta, tracks_rows, fragmentation_report)
-    moving_meta, moving_rows, static_gate_report = _moving_filtered_tracks(fragmentation_meta, fragmentation_rows, frame_rate)
+    moving_meta, moving_rows, static_gate_report, dimension_gate_report = _moving_filtered_tracks(
+        fragmentation_meta, fragmentation_rows, frame_rate
+    )
     moving_summary = _summarize_track_set(moving_meta)
     moving_recording_meta = _build_recording_meta(recording_id, location_id, frame_rate, num_frames, ortho, moving_summary)
 
@@ -3622,6 +3684,7 @@ def convert_dataset(
     moving_filter_info = dict(base_filter_info)
     moving_filter_info.update(_fragmentation_filter_info_by_raw(fragmentation_report))
     moving_filter_info.update(_static_filter_info_by_raw(static_gate_report))
+    moving_filter_info.update(_implausible_car_filter_info_by_raw(dimension_gate_report))
     full_id_mapping_rows = _build_id_mapping_rows(folder_name, "full", raw_stats_by_id, tracks_meta, full_filter_info)
     moving_id_mapping_rows = _build_id_mapping_rows(folder_name, "moving_filtered", raw_stats_by_id, moving_meta, moving_filter_info)
     full_filter_report_rows = _build_filter_report_rows(folder_name, "full", raw_stats_by_id, tracks_meta, full_filter_info)
@@ -3678,6 +3741,25 @@ def convert_dataset(
                 item["mean_speed"],
                 item["static_ratio"],
                 item["filter_reason"],
+            ),
+        )
+    log_line("INFO", f"implausible_car_dimension_parameters={IMPLAUSIBLE_CAR_DIMENSIONS}")
+    log_line(
+        "INFO",
+        "implausible_car_dimension_filtered_tracks=%s"
+        % dimension_gate_report["filtered_track_count"],
+    )
+    for item in dimension_gate_report["filtered_tracks"]:
+        log_line(
+            "INFO",
+            "dimension_filtered trackId=%s raw_object_id=%s width=%.4f length=%.4f reason=%s signals=%s"
+            % (
+                item["trackId"],
+                item.get("raw_object_id", item["trackId"]),
+                item["width"],
+                item["length"],
+                item["filter_reason"],
+                item.get("signals", []),
             ),
         )
     log_line("INFO", f"category_jump_object_count={quality['raw_object_category_jump_count']}")
@@ -3756,6 +3838,7 @@ def convert_dataset(
         "orthoPxToMeter": ortho,
         "quality": _json_safe(quality),
         "staticGate": _json_safe(static_gate_report),
+        "implausibleCarDimensions": _json_safe(dimension_gate_report),
     }
 
     full_report = dict(base_report)
@@ -3768,6 +3851,10 @@ def convert_dataset(
                 "strategy": FRAGMENTATION_FILTER["filter_strategy"],
                 "groups": [],
                 "filtered_track_count": 0,
+            },
+            "implausibleCarDimensions": {
+                **_json_safe(dimension_gate_report),
+                "use_filter": False,
             },
             "finalTrackCount": full_summary["numTracks"],
             "classTrackCounts": full_summary["classTrackCounts"],
@@ -3782,6 +3869,10 @@ def convert_dataset(
             "fragmentationFilter": {
                 **_json_safe(fragmentation_report),
                 "use_fragmentation_filter": True,
+            },
+            "implausibleCarDimensions": {
+                **_json_safe(dimension_gate_report),
+                "use_filter": True,
             },
             "finalTrackCount": moving_summary["numTracks"],
             "classTrackCounts": moving_summary["classTrackCounts"],
@@ -3830,8 +3921,9 @@ def convert_dataset(
             },
             "moving_filtered": {
                 "numTracks": moving_summary["numTracks"],
-                "filteredTracks": static_gate_report["filtered_track_count"] + fragmentation_report.get("filtered_track_count", 0),
+                "filteredTracks": full_summary["numTracks"] - moving_summary["numTracks"],
                 "staticFilteredTracks": static_gate_report["filtered_track_count"],
+                "implausibleCarDimensionFilteredTracks": dimension_gate_report["filtered_track_count"],
                 "fragmentationFilteredTracks": fragmentation_report.get("filtered_track_count", 0),
                 "outputs": version_outputs["moving_filtered"],
             },

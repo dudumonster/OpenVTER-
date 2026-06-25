@@ -126,7 +126,10 @@ class DroneVideoProcess:
         # —— 掩膜诊断：只打印一次
         self._mask_warned = False
 
-        self.det_bbox_result = {'video_info': [], 'output_info': {'output_fps': self.out_fps}, 'traj_info': [],
+        self.det_bbox_result = {'video_info': [], 'output_info': {
+                                    'output_fps': self.out_fps,
+                                    'road_calibration': self.road_config.get('calibration_report', {}),
+                                }, 'traj_info': [],
                                 'process_time': datetime.datetime.now(),'raw_det':[]}
         # 存储检测结果
         #video_info: 视频信息

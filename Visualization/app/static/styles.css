@@ -322,6 +322,80 @@ button:hover {
   min-width: 2px;
 }
 
+.dimension-summary {
+  margin-bottom: 8px;
+  color: #344054;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.length-distribution-layers {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.length-distribution-layer {
+  padding: 7px 7px 3px;
+  border: 1px solid #e4e9f2;
+  border-radius: 3px;
+  background: #ffffff;
+}
+
+.length-distribution-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #475467;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.length-distribution-header strong {
+  color: #101828;
+}
+
+.class-length-histogram {
+  display: block;
+  width: 100%;
+  height: 116px;
+}
+
+.dimension-table-wrap {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid #e4e9f2;
+}
+
+.dimension-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dimension-table th,
+.dimension-table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid #eef2f6;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.dimension-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc;
+  color: #475467;
+}
+
+.dimension-table th:nth-child(2),
+.dimension-table td:nth-child(2) {
+  text-align: left;
+}
+
 .canvas-toolbar {
   justify-content: space-between;
   min-height: 52px;

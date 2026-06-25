@@ -3,8 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
     <title>OpenVTER Trajectory Visualizer</title>
     <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/dimension_analysis.js" defer></script>
+    <script src="/static/app.js" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -58,9 +61,21 @@
           </section>
 
           <section>
+            <div class="section-title">车辆尺寸与长度分布</div>
+            <div id="dimensionSummary" class="dimension-summary">未加载数据集</div>
+            <div id="lengthDistributionLayers" class="length-distribution-layers" aria-label="按类别分层的车辆长度分布图"></div>
+            <div class="dimension-table-wrap">
+              <table class="dimension-table">
+                <thead><tr><th>ID</th><th>类别</th><th>长(m)</th><th>宽(m)</th></tr></thead>
+                <tbody id="dimensionTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section>
             <div class="section-title">显示参数</div>
             <label class="check-row"><input id="bboxToggle" type="checkbox" checked /><span>显示 bbox</span></label>
-            <label class="check-row"><input id="labelToggle" type="checkbox" checked /><span>显示 object_id</span></label>
+            <label class="check-row"><input id="labelToggle" type="checkbox" checked /><span>显示ID/类别</span></label>
             <label class="check-row"><input id="laneToggle" type="checkbox" /><span>显示车道</span></label>
             <label class="check-row"><input id="keepUnrelatedToggle" type="checkbox" checked /><span>保留无关区域</span></label>
             <label class="field-label" for="trailRange">拖尾帧数 <span id="trailValue">50</span></label>
@@ -110,6 +125,5 @@
         </section>
       </main>
     </div>
-    <script src="/static/app.js"></script>
   </body>
 </html>

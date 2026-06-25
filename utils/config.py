@@ -142,6 +142,186 @@ class Config:
 
 class RoadConfig:
 
+    VEHICLE_CALIBRATION_MIN_COUNT = 5
+    CALIBRATION_CONFLICT_THRESHOLD = 0.08
+    GROUND_CALIBRATION_WEIGHT = 0.75
+    VEHICLE_CALIBRATION_WEIGHT = 0.25
+    CALIBRATION_OUTLIER_Z = 3.5
+
+    @staticmethod
+    def _calibration_observation(shape, source):
+        label = str(shape.get('label', ''))
+        try:
+            length = float(label.split('_')[-1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid calibration label %r; expected a numeric suffix." % label) from exc
+        if not np.isfinite(length) or length <= 0:
+            raise ValueError("Calibration %s must use a positive finite physical length." % label)
+        points = shape.get('points') or []
+        if len(points) < 2:
+            raise ValueError("Calibration %s must contain two endpoints." % label)
+        x1, y1 = points[0]
+        x2, y2 = points[1]
+        pixel_length = float(((x1-x2)**2+(y1-y2)**2)**0.5)
+        if not np.isfinite(pixel_length) or pixel_length <= 0:
+            raise ValueError(
+                "Road config has a length calibration with identical or invalid endpoints: %s" % label
+            )
+        return {
+            'label': label,
+            'source': source,
+            'physical_length_m': length,
+            'pixel_length': pixel_length,
+            'meters_per_pixel': length / pixel_length,
+            'midpoint': [float((x1 + x2) / 2.0), float((y1 + y2) / 2.0)],
+        }
+
+    @staticmethod
+    def _robust_calibration_group(observations, source):
+        if not observations:
+            return {
+                'source': source,
+                'total_count': 0,
+                'accepted_count': 0,
+                'median_meters_per_pixel': None,
+                'mad_meters_per_pixel': None,
+                'relative_mad': None,
+                'observations': [],
+            }
+
+        values = np.asarray([item['meters_per_pixel'] for item in observations], dtype=float)
+        median = float(np.median(values))
+        deviations = np.abs(values - median)
+        mad = float(np.median(deviations))
+        if len(values) >= 3 and mad > np.finfo(float).eps:
+            robust_z = deviations / (1.4826 * mad)
+            accepted_mask = robust_z <= RoadConfig.CALIBRATION_OUTLIER_Z
+        elif len(values) >= 3:
+            relative_deviation = deviations / max(abs(median), np.finfo(float).eps)
+            accepted_mask = relative_deviation <= 0.10
+        else:
+            accepted_mask = np.ones(len(values), dtype=bool)
+        if not bool(np.any(accepted_mask)):
+            accepted_mask = np.ones(len(values), dtype=bool)
+
+        accepted_values = values[accepted_mask]
+        accepted_median = float(np.median(accepted_values))
+        accepted_mad = float(np.median(np.abs(accepted_values - accepted_median)))
+        observation_report = []
+        for item, accepted in zip(observations, accepted_mask.tolist()):
+            report_item = dict(item)
+            report_item['accepted'] = bool(accepted)
+            report_item['relative_deviation_from_group_median'] = float(
+                abs(item['meters_per_pixel'] - accepted_median) / max(abs(accepted_median), np.finfo(float).eps)
+            )
+            observation_report.append(report_item)
+        return {
+            'source': source,
+            'total_count': len(observations),
+            'accepted_count': int(np.count_nonzero(accepted_mask)),
+            'median_meters_per_pixel': accepted_median,
+            'mad_meters_per_pixel': accepted_mad,
+            'relative_mad': float(accepted_mad / max(abs(accepted_median), np.finfo(float).eps)),
+            'observations': observation_report,
+        }
+
+    @staticmethod
+    def _spatial_calibration_summary(observations, width, height):
+        quadrants = {'top_left': [], 'top_right': [], 'bottom_left': [], 'bottom_right': []}
+        for item in observations:
+            x, y = item['midpoint']
+            vertical = 'top' if y < height / 2.0 else 'bottom'
+            horizontal = 'left' if x < width / 2.0 else 'right'
+            quadrants['%s_%s' % (vertical, horizontal)].append(float(item['meters_per_pixel']))
+        summary = {}
+        medians = []
+        for name, values in quadrants.items():
+            median = float(np.median(values)) if values else None
+            summary[name] = {'count': len(values), 'median_meters_per_pixel': median}
+            if median is not None:
+                medians.append(median)
+        relative_spread = None
+        if len(medians) >= 2:
+            center = float(np.median(medians))
+            relative_spread = float((max(medians) - min(medians)) / max(abs(center), np.finfo(float).eps))
+        return summary, relative_spread
+
+    @staticmethod
+    def _build_calibration_report(ground_observations, vehicle_observations, width, height):
+        ground = RoadConfig._robust_calibration_group(ground_observations, 'ground')
+        vehicle = RoadConfig._robust_calibration_group(vehicle_observations, 'vehicle')
+        warnings = []
+        ground_scale = ground['median_meters_per_pixel']
+        vehicle_scale = vehicle['median_meters_per_pixel']
+        relative_difference = None
+        final_scale = None
+        final_source = 'missing_ground_calibration'
+
+        vehicle_eligible = vehicle['accepted_count'] >= RoadConfig.VEHICLE_CALIBRATION_MIN_COUNT
+        if ground_scale is None:
+            if vehicle_eligible and vehicle_scale is not None:
+                final_scale = float(vehicle_scale)
+                final_source = 'vehicle_only'
+                warnings.append(
+                    'No ground length_* calibration is available; using the robust vehicle calibration only.'
+                )
+            else:
+                warnings.append(
+                    'No ground length_* calibration is available and fewer than %s valid vehicle marks were found.'
+                    % RoadConfig.VEHICLE_CALIBRATION_MIN_COUNT
+                )
+        else:
+            final_scale = float(ground_scale)
+            final_source = 'ground_only'
+            if 0 < vehicle['accepted_count'] < RoadConfig.VEHICLE_CALIBRATION_MIN_COUNT:
+                warnings.append(
+                    'Vehicle calibration ignored: %s accepted marks, minimum is %s.'
+                    % (vehicle['accepted_count'], RoadConfig.VEHICLE_CALIBRATION_MIN_COUNT)
+                )
+            if vehicle_eligible and vehicle_scale is not None:
+                relative_difference = float(abs(vehicle_scale - ground_scale) / max(abs(ground_scale), np.finfo(float).eps))
+                if relative_difference <= RoadConfig.CALIBRATION_CONFLICT_THRESHOLD:
+                    final_scale = float(
+                        RoadConfig.GROUND_CALIBRATION_WEIGHT * ground_scale
+                        + RoadConfig.VEHICLE_CALIBRATION_WEIGHT * vehicle_scale
+                    )
+                    final_source = 'ground_vehicle_weighted'
+                else:
+                    final_source = 'ground_fallback_vehicle_conflict'
+                    warnings.append(
+                        'Ground and vehicle calibration differ by %.2f%%; vehicle calibration was ignored.'
+                        % (relative_difference * 100.0)
+                    )
+
+        accepted_observations = [
+            item for group in (ground, vehicle) for item in group['observations'] if item['accepted']
+        ]
+        spatial_quadrants, spatial_relative_spread = RoadConfig._spatial_calibration_summary(
+            accepted_observations, width, height
+        )
+        if spatial_relative_spread is not None and spatial_relative_spread > RoadConfig.CALIBRATION_CONFLICT_THRESHOLD:
+            warnings.append(
+                'Calibration scale varies by %.2f%% across image quadrants; a global affine transform may be insufficient.'
+                % (spatial_relative_spread * 100.0)
+            )
+
+        return {
+            'ground': ground,
+            'vehicle': vehicle,
+            'vehicle_min_count': RoadConfig.VEHICLE_CALIBRATION_MIN_COUNT,
+            'conflict_threshold': RoadConfig.CALIBRATION_CONFLICT_THRESHOLD,
+            'weights': {
+                'ground': RoadConfig.GROUND_CALIBRATION_WEIGHT,
+                'vehicle': RoadConfig.VEHICLE_CALIBRATION_WEIGHT,
+            },
+            'relative_group_difference': relative_difference,
+            'spatial_quadrants': spatial_quadrants,
+            'spatial_relative_spread': spatial_relative_spread,
+            'final_meters_per_pixel': final_scale,
+            'final_source': final_source,
+            'warnings': warnings,
+        }
+
     @staticmethod
     def fromfile(filename):
         return RoadConfig._file2dict(filename)
@@ -155,7 +335,8 @@ class RoadConfig:
             raise IOError('Only json type are supported now!')
         stab_mask = None
         # fixed_points = []
-        length_per_pixel_ls = []
+        ground_calibrations = []
+        vehicle_calibrations = []
         lane_dict = {}
         base_points = None
         x_axis_end = None
@@ -206,19 +387,10 @@ class RoadConfig:
                         key_name = shape['label']
                         value_points = shape["points"]
                         laneline_dict[key_name] = value_points
-                    if shape['label'].startswith('length'): # 单位像素距离
-                        length = float(shape['label'].split('_')[-1])
-                        points = shape['points']
-                        x1, y1 = points[0]
-                        x2, y2 = points[1]
-                        pixel_length = ((x1-x2)**2+(y1-y2)**2)**0.5
-                        if pixel_length == 0:
-                            raise ValueError(
-                                "Road config %s has a length calibration with "
-                                "identical endpoints: %s" % (filename, shape['label'])
-                            )
-                        length_per_pixel = length/pixel_length
-                        length_per_pixel_ls.append(length_per_pixel)
+                    if shape['label'].startswith('vehicle_length_'):
+                        vehicle_calibrations.append(RoadConfig._calibration_observation(shape, 'vehicle'))
+                    elif shape['label'].startswith('length_'): # 路面单位像素距离，兼容既有标注
+                        ground_calibrations.append(RoadConfig._calibration_observation(shape, 'ground'))
                     if shape['label'] == 'x': # x轴
                         points = shape['points']
                         base_points = points[0] # 原点
@@ -238,8 +410,11 @@ class RoadConfig:
                     footpoint = getFootPoint(y_point,base_points,x_axis_end)  # 获取垂足
                     y_axis_vector = [y_point[0]-footpoint[0],y_point[1]-footpoint[1]]
 
-                if len(length_per_pixel_ls)>0:
-                    mean_length_per_pixel = np.mean(length_per_pixel_ls)
+                calibration_report = RoadConfig._build_calibration_report(
+                    ground_calibrations, vehicle_calibrations, width, height
+                )
+                mean_length_per_pixel = calibration_report['final_meters_per_pixel']
+                if mean_length_per_pixel is not None:
                     if x_axis_vector and y_axis_vector:
                         unit =10
                         axis_image = RoadConfig._generate_axis_image(width, height, base_points, x_axis_vector, y_axis_vector, mean_length_per_pixel, unit)
@@ -250,7 +425,8 @@ class RoadConfig:
                'length_per_pixel':mean_length_per_pixel,'base_points':base_points,
                'x_axis_vector':x_axis_vector,'y_axis_vector':y_axis_vector,'lane':lane_dict,'axis_image':axis_image,
                'pixel2xy_matrix':pixel2xy_matrix,"intersection_region":intersection_region,
-               "drivingline":drivingline,"laneline":laneline_dict,"image":img_np}
+               "drivingline":drivingline,"laneline":laneline_dict,"image":img_np,
+               'calibration_report':calibration_report}
         # img_logo_gray = cv2.cvt Color(axis_image, cv2.COLOR_BGR2GRAY)
         # ret, img_logo_mask = cv2.threshold(img_logo_gray, 10, 255, cv2.THRESH_BINARY)  # 二值化函数
         # img_logo_mask = cv2.bitwise_not(img_logo_mask)

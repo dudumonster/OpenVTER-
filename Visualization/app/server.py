@@ -17,7 +17,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from converter import DEFAULT_ADJUSTED_ROOT, DEFAULT_FINAL_ROOT, DEFAULT_INITIAL_ROOT, convert_all
+try:
+    from .converter import DEFAULT_ADJUSTED_ROOT, DEFAULT_FINAL_ROOT, DEFAULT_INITIAL_ROOT, convert_all
+except ImportError:
+    from converter import DEFAULT_ADJUSTED_ROOT, DEFAULT_FINAL_ROOT, DEFAULT_INITIAL_ROOT, convert_all
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -352,12 +355,16 @@ def _standard_objects(dataset_dir: Path):
     for row in tracks_meta:
         track_id = row.get("trackId")
         metric = metrics.get(str(track_id), {})
+        width = _float(row.get("corrected_width"), _float(row.get("width"), None))
+        length = _float(row.get("corrected_height"), _float(row.get("length"), None))
         out.append(
             {
                 "dataset_id": dataset_dir.name,
                 "object_id": track_id,
                 "raw_object_id": row.get("raw_object_id") or track_id,
                 "class_name": row.get("class"),
+                "width": width,
+                "length": length,
                 "start_frame": row.get("initialFrame"),
                 "end_frame": row.get("finalFrame"),
                 "total_frames": row.get("numFrames"),

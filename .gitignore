@@ -103,6 +103,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.local
 .venv
 env/
 venv/
@@ -165,6 +166,7 @@ output/
 outputs/
 results/
 logs/
+tmp/
 checkpoints/
 tools/*/output/
 trajectories.csv
@@ -176,6 +178,7 @@ trajectories.xlsx
 *.xlsx
 *.xls
 *.tmp
+.ai-worklog/*.tmp
 *.temp
 *.bak
 *.swp

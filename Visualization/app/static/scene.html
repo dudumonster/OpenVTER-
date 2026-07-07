@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>OpenVTER Scene Analysis</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/scene_analysis.js" defer></script>
+  </head>
+  <body class="scene-page">
+    <header class="scene-page-header">
+      <div>
+        <div class="scene-kicker">OpenVTER Scene Analysis</div>
+        <h1>全场景车辆长度分析</h1>
+        <p id="scenePageStatus">等待场景汇总</p>
+      </div>
+      <div class="scene-page-actions">
+        <a class="secondary-link-button" href="/">返回视频</a>
+        <button id="sceneRefreshButton" class="primary-button">刷新</button>
+      </div>
+    </header>
+
+    <main class="scene-page-main">
+      <section class="scene-section">
+        <div id="sceneOverviewCards" class="scene-metric-grid"></div>
+      </section>
+
+      <section class="scene-section">
+        <div class="scene-section-head">
+          <div>
+            <h2>优先检查视频</h2>
+            <p>按缺失结果、car 过长、van 偏短和 van 占比自动排序。</p>
+          </div>
+        </div>
+        <div id="sceneRiskList" class="scene-risk-list"></div>
+      </section>
+
+      <section class="scene-section">
+        <div class="scene-section-head">
+          <div>
+            <h2>全场景长度分布</h2>
+            <p>包含 car、van、truck、bus、freight_car 和 motor。</p>
+          </div>
+        </div>
+        <div id="sceneLengthCharts" class="scene-length-charts scene-length-charts-large"></div>
+      </section>
+
+      <section class="scene-section">
+        <div class="scene-section-head">
+          <div>
+            <h2>所有视频运行情况</h2>
+            <p>点击视频名可回到视频页面后在左侧选择对应数据集。</p>
+          </div>
+        </div>
+        <div class="scene-table-wrap scene-table-wrap-large">
+          <table class="scene-video-table">
+            <thead>
+              <tr>
+                <th>视频</th>
+                <th>状态</th>
+                <th>车辆</th>
+                <th>car</th>
+                <th>van</th>
+                <th>motor</th>
+                <th>car >= 5.4m</th>
+                <th>van < 5.4m</th>
+                <th>risk</th>
+              </tr>
+            </thead>
+            <tbody id="sceneVideoTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

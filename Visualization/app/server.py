@@ -28,6 +28,17 @@ STATIC_ROOT = APP_ROOT / "static"
 VIS_ROOT = APP_ROOT.parent
 DEFAULT_VISUALIZER_LOG_PATH = VIS_ROOT / "logs" / "visualization_server.log"
 VISUALIZER_LOGGER = logging.getLogger("openvter_visualizer")
+ACTIVE_INITIAL_ROOT = DEFAULT_INITIAL_ROOT
+ACTIVE_ADJUSTED_ROOT = DEFAULT_ADJUSTED_ROOT
+ACTIVE_FINAL_ROOT = DEFAULT_FINAL_ROOT
+
+
+def _set_runtime_roots(initial_root: Path, adjusted_root: Path, final_root: Path) -> None:
+    global ACTIVE_INITIAL_ROOT, ACTIVE_ADJUSTED_ROOT, ACTIVE_FINAL_ROOT
+    ACTIVE_INITIAL_ROOT = Path(initial_root).expanduser().resolve()
+    ACTIVE_ADJUSTED_ROOT = Path(adjusted_root).expanduser().resolve()
+    ACTIVE_FINAL_ROOT = Path(final_root).expanduser().resolve()
+    _affine_from_pkl.cache_clear()
 
 
 def configure_visualizer_logger(log_path: Path = DEFAULT_VISUALIZER_LOG_PATH) -> logging.Logger:
@@ -50,8 +61,9 @@ def _safe_dataset_path(dataset_id: str, version: str) -> Path:
         or ".." in dataset_id
     ):
         raise ValueError("Invalid dataset id.")
-    path = (DEFAULT_FINAL_ROOT / dataset_id).resolve()
-    if DEFAULT_FINAL_ROOT.resolve() not in path.parents and path != DEFAULT_FINAL_ROOT.resolve():
+    final_root = ACTIVE_FINAL_ROOT.resolve()
+    path = (final_root / dataset_id).resolve()
+    if final_root not in path.parents and path != final_root:
         raise ValueError("Dataset path escapes Final Data.")
     return path
 
@@ -85,7 +97,7 @@ def _background_path(dataset_id: str, dataset_dir: Path = None):
         candidates.extend(sorted(dataset_dir.glob("first_frame*.jpg")))
         candidates.extend(sorted(dataset_dir.glob("first_frame*.jpeg")))
         candidates.extend(sorted(dataset_dir.glob("first_frame*.png")))
-    source_dir = DEFAULT_INITIAL_ROOT / dataset_id
+    source_dir = ACTIVE_INITIAL_ROOT / dataset_id
     if source_dir.exists():
         candidates.extend(sorted(source_dir.glob("background*.jpg")))
         candidates.extend(sorted(source_dir.glob("background*.jpeg")))
@@ -139,6 +151,192 @@ def _standard_dataset_summary_light(dataset_dir: Path):
         "source_type": "final_data" if is_available else "missing_final_data",
         "is_available": is_available,
         "missing_files": missing_files,
+    }
+
+
+SCENE_VEHICLE_CLASSES = ["car", "van", "truck", "bus", "freight_car", "motor", "tricycle", "bicycle", "awning-tricycle"]
+SCENE_LENGTH_BINS = [0.0, 3.5, 4.0, 4.5, 5.0, 5.4, 6.0, 6.8, 8.0, 9.5, 12.0, math.inf]
+
+
+def _scene_bin_label(lo: float, hi: float) -> str:
+    if math.isinf(hi):
+        return f">={lo:g}"
+    return f"{lo:g}-{hi:g}"
+
+
+def _scene_empty_histogram():
+    return [
+        {"label": _scene_bin_label(lo, hi), "min": lo, "max": None if math.isinf(hi) else hi, "count": 0}
+        for lo, hi in zip(SCENE_LENGTH_BINS[:-1], SCENE_LENGTH_BINS[1:])
+    ]
+
+
+def _scene_add_length(histogram, length: float) -> None:
+    for item, lo, hi in zip(histogram, SCENE_LENGTH_BINS[:-1], SCENE_LENGTH_BINS[1:]):
+        if lo <= length < hi:
+            item["count"] += 1
+            return
+
+
+def _scene_length_stats(values):
+    values = sorted(v for v in values if v is not None and math.isfinite(v))
+    if not values:
+        return {"count": 0, "min": None, "median": None, "mean": None, "p95": None, "max": None}
+
+    def q(pct):
+        if len(values) == 1:
+            return values[0]
+        rank = (len(values) - 1) * pct / 100.0
+        lo = int(math.floor(rank))
+        hi = int(math.ceil(rank))
+        if lo == hi:
+            return values[lo]
+        return values[lo] * (hi - rank) + values[hi] * (rank - lo)
+
+    return {
+        "count": len(values),
+        "min": values[0],
+        "median": q(50),
+        "mean": sum(values) / len(values),
+        "p95": q(95),
+        "max": values[-1],
+    }
+
+
+def _scene_class_summary(class_name: str, rows):
+    lengths = []
+    widths = []
+    histogram = _scene_empty_histogram()
+    for row in rows:
+        length = _float(row.get("corrected_height"), _float(row.get("length")))
+        width = _float(row.get("corrected_width"), _float(row.get("width")))
+        if length is not None and length > 0:
+            lengths.append(length)
+            _scene_add_length(histogram, length)
+        if width is not None and width > 0:
+            widths.append(width)
+    stats = _scene_length_stats(lengths)
+    width_stats = _scene_length_stats(widths)
+    peak = max(histogram, key=lambda item: item["count"], default={"label": "", "count": 0})
+    return {
+        "class_name": class_name,
+        "count": len(rows),
+        "length": stats,
+        "width": width_stats,
+        "histogram": histogram,
+        "peak_label": peak["label"],
+        "peak_count": peak["count"],
+    }
+
+
+def _scene_summary() -> dict:
+    ACTIVE_INITIAL_ROOT.mkdir(parents=True, exist_ok=True)
+    ACTIVE_FINAL_ROOT.mkdir(parents=True, exist_ok=True)
+
+    initial_names = {path.name for path in ACTIVE_INITIAL_ROOT.iterdir() if path.is_dir()}
+    final_names = {path.name for path in ACTIVE_FINAL_ROOT.iterdir() if path.is_dir()}
+    names = sorted(initial_names | final_names)
+
+    videos = []
+    all_rows = []
+    total_class_counts = Counter()
+    issue_count = 0
+    car_long_count = 0
+    van_short_count = 0
+
+    for name in names:
+        final_dir = ACTIVE_FINAL_ROOT / name
+        status = "converted" if _is_standard_dataset(final_dir) else "missing_final_data"
+        missing_files = [] if status == "converted" else _missing_standard_files(final_dir)
+        class_counts = Counter()
+        vehicle_count = 0
+        car_count = 0
+        van_count = 0
+        car_ge_5_4 = 0
+        van_lt_5_4 = 0
+        tracks_meta = []
+
+        if status == "converted":
+            try:
+                _, tracks_meta, _ = _standard_header_source(final_dir)
+            except Exception as exc:
+                status = "read_failed"
+                missing_files = [str(exc)]
+
+        if status == "converted":
+            for row in tracks_meta:
+                class_name = row.get("class") or "unknown"
+                class_counts[class_name] += 1
+                total_class_counts[class_name] += 1
+                all_rows.append(row)
+                if class_name in SCENE_VEHICLE_CLASSES:
+                    vehicle_count += 1
+                length = _float(row.get("corrected_height"), _float(row.get("length")))
+                if class_name == "car":
+                    car_count += 1
+                    if length is not None and length >= 5.4:
+                        car_ge_5_4 += 1
+                        car_long_count += 1
+                elif class_name == "van":
+                    van_count += 1
+                    if length is not None and length < 5.4:
+                        van_lt_5_4 += 1
+                        van_short_count += 1
+        else:
+            issue_count += 1
+
+        videos.append(
+            {
+                "dataset_id": name,
+                "status": status,
+                "missing_files": missing_files,
+                "track_count": len(tracks_meta),
+                "vehicle_count": vehicle_count,
+                "class_counts": dict(sorted(class_counts.items())),
+                "car_count": car_count,
+                "van_count": van_count,
+                "car_ge_5_4": car_ge_5_4,
+                "car_ge_5_4_ratio": car_ge_5_4 / car_count if car_count else 0.0,
+                "van_lt_5_4": van_lt_5_4,
+                "van_lt_5_4_ratio": van_lt_5_4 / van_count if van_count else 0.0,
+                "has_initial": name in initial_names,
+                "has_final": name in final_names,
+            }
+        )
+
+    by_class = defaultdict(list)
+    for row in all_rows:
+        by_class[row.get("class") or "unknown"].append(row)
+
+    class_summaries = [
+        _scene_class_summary(class_name, by_class[class_name])
+        for class_name in SCENE_VEHICLE_CLASSES
+        if by_class.get(class_name)
+    ]
+    other_classes = sorted(set(by_class) - set(SCENE_VEHICLE_CLASSES))
+    class_summaries.extend(_scene_class_summary(class_name, by_class[class_name]) for class_name in other_classes)
+
+    vehicle_total = sum(row["vehicle_count"] for row in videos)
+    car_total = total_class_counts.get("car", 0)
+    van_total = total_class_counts.get("van", 0)
+    return {
+        "initial_root": str(ACTIVE_INITIAL_ROOT),
+        "final_root": str(ACTIVE_FINAL_ROOT),
+        "video_count": len(videos),
+        "converted_count": sum(1 for row in videos if row["status"] == "converted"),
+        "issue_count": issue_count,
+        "track_count": len(all_rows),
+        "vehicle_count": vehicle_total,
+        "class_counts": dict(sorted(total_class_counts.items())),
+        "car_count": car_total,
+        "van_count": van_total,
+        "car_ge_5_4": car_long_count,
+        "car_ge_5_4_ratio": car_long_count / car_total if car_total else 0.0,
+        "van_lt_5_4": van_short_count,
+        "van_lt_5_4_ratio": van_short_count / van_total if van_total else 0.0,
+        "length_bins": [_scene_bin_label(lo, hi) for lo, hi in zip(SCENE_LENGTH_BINS[:-1], SCENE_LENGTH_BINS[1:])],
+        "class_summaries": class_summaries,
+        "videos": videos,
     }
 
 
@@ -409,7 +607,7 @@ def _standard_frames(dataset_dir: Path):
 
 
 def _source_dataset_dir(dataset_id: str) -> Path:
-    return DEFAULT_INITIAL_ROOT / dataset_id
+    return ACTIVE_INITIAL_ROOT / dataset_id
 
 
 def _looks_like_road_config(path: Path) -> bool:
@@ -683,6 +881,9 @@ class VisualizerHandler(BaseHTTPRequestHandler):
             if path == "/" or path == "/index.html":
                 self._serve_file(STATIC_ROOT / "index.html")
                 return
+            if path == "/scene.html":
+                self._serve_file(STATIC_ROOT / "scene.html")
+                return
             if path.startswith("/static/"):
                 rel = path[len("/static/") :]
                 file_path = (STATIC_ROOT / rel).resolve()
@@ -693,6 +894,9 @@ class VisualizerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/datasets":
                 self._send_json(self._datasets())
+                return
+            if path == "/api/scene-summary":
+                self._send_json(_scene_summary())
                 return
             if path.startswith("/api/datasets/"):
                 self._dataset_endpoint(path)
@@ -710,28 +914,33 @@ class VisualizerHandler(BaseHTTPRequestHandler):
         try:
             query = parse_qs(parsed.query)
             force = query.get("force", ["false"])[0].lower() in {"1", "true", "yes"}
-            result = convert_all(DEFAULT_INITIAL_ROOT, DEFAULT_ADJUSTED_ROOT, force=force)
+            result = convert_all(
+                ACTIVE_INITIAL_ROOT,
+                ACTIVE_ADJUSTED_ROOT,
+                force=force,
+                final_root=ACTIVE_FINAL_ROOT,
+            )
             self._send_json(result)
         except Exception as exc:
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
 
     def _datasets(self):
-        DEFAULT_INITIAL_ROOT.mkdir(parents=True, exist_ok=True)
-        DEFAULT_FINAL_ROOT.mkdir(parents=True, exist_ok=True)
+        ACTIVE_INITIAL_ROOT.mkdir(parents=True, exist_ok=True)
+        ACTIVE_FINAL_ROOT.mkdir(parents=True, exist_ok=True)
         converted = []
-        for dataset_dir in sorted(DEFAULT_FINAL_ROOT.iterdir()):
+        for dataset_dir in sorted(ACTIVE_FINAL_ROOT.iterdir()):
             if not dataset_dir.is_dir():
                 continue
             converted.append(_standard_dataset_summary_light(dataset_dir))
 
         initial = []
-        for source_dir in sorted(DEFAULT_INITIAL_ROOT.iterdir()):
+        for source_dir in sorted(ACTIVE_INITIAL_ROOT.iterdir()):
             if source_dir.is_dir():
                 initial.append(
                     {
                         "dataset_id": source_dir.name,
                         "has_pkl": None,
-                        "converted": _is_standard_dataset(DEFAULT_FINAL_ROOT / source_dir.name),
+                        "converted": _is_standard_dataset(ACTIVE_FINAL_ROOT / source_dir.name),
                     }
                 )
         return {"converted": converted, "initial": initial}
@@ -787,14 +996,27 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local OpenVTER trajectory visualizer.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--initial-root", default=str(DEFAULT_INITIAL_ROOT), help="Folder containing raw result subfolders.")
+    parser.add_argument("--adjusted-root", default=str(DEFAULT_ADJUSTED_ROOT), help="Folder for converted intermediate CSV datasets.")
+    parser.add_argument("--final-root", default=str(DEFAULT_FINAL_ROOT), help="Folder containing final visualization CSV datasets.")
     args = parser.parse_args()
 
+    _set_runtime_roots(Path(args.initial_root), Path(args.adjusted_root), Path(args.final_root))
     logger = configure_visualizer_logger()
+    ACTIVE_INITIAL_ROOT.mkdir(parents=True, exist_ok=True)
+    ACTIVE_ADJUSTED_ROOT.mkdir(parents=True, exist_ok=True)
+    ACTIVE_FINAL_ROOT.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((args.host, args.port), VisualizerHandler)
     url = f"http://{args.host}:{args.port}"
     print(f"OpenVTER trajectory visualizer running at {url}")
+    print(f"Initial root: {ACTIVE_INITIAL_ROOT}")
+    print(f"Adjusted root: {ACTIVE_ADJUSTED_ROOT}")
+    print(f"Final root: {ACTIVE_FINAL_ROOT}")
     print("Press Ctrl+C to stop.")
     logger.info("OpenVTER trajectory visualizer running at %s", url)
+    logger.info("Initial root: %s", ACTIVE_INITIAL_ROOT)
+    logger.info("Adjusted root: %s", ACTIVE_ADJUSTED_ROOT)
+    logger.info("Final root: %s", ACTIVE_FINAL_ROOT)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

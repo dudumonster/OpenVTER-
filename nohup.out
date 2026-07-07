@@ -1,0 +1,11 @@
+bash: /opt/conda/lib/libtinfo.so.6: no version information available (required by bash)
+Traceback (most recent call last):
+  File "/public/home/dudu030900/Code/OpenVTER/src/run_scene.py", line 27, in <module>
+    from utils import RoadConfig
+  File "/public/home/dudu030900/Code/OpenVTER/utils/__init__.py", line 11, in <module>
+    from .config import Config,RoadConfig,MultiVideosConfig,visualize_config
+  File "/public/home/dudu030900/Code/OpenVTER/utils/config.py", line 20, in <module>
+    from shapely.geometry import Point
+ModuleNotFoundError: No module named 'shapely'
+bash: /opt/conda/lib/libtinfo.so.6: no version information available (required by bash)
+scripts/run_scene_server.sh: line 2: set: pipefail: invalid option name

@@ -7,6 +7,7 @@ import faulthandler
 import json
 import logging
 import math
+import os
 import re
 import sys
 from copy import deepcopy
@@ -30,6 +31,10 @@ from utils.resource_monitor import ResourceMonitor, configure_runtime_threads
 
 VIDEO_SUFFIXES = {".mp4", ".MP4", ".mov", ".MOV", ".avi", ".AVI", ".mkv", ".MKV"}
 TRAILING_NUMBER_RE = re.compile(r"(\d+)$")
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -274,6 +279,7 @@ def main() -> None:
     thread_status = configure_runtime_threads(base_config.get("cpu_threads"))
     monitor = ResourceMonitor(base_config.get("monitor_interval"))
     selected_range = _parse_video_range(args.video_range)
+    force_rerun = args.force or _env_flag("FORCE_RERUN")
 
     scene_dir = Path(args.scene_dir).expanduser()
     road_config_dir = Path(args.road_config_dir).expanduser()
@@ -307,8 +313,13 @@ def main() -> None:
             selected_range[0],
             selected_range[1],
         )
-    if args.force:
-        logger.info("Force mode enabled: completed videos will be re-run.")
+    if force_rerun:
+        logger.info(
+            "Force rerun enabled: completed videos will be re-run and existing outputs "
+            "will be overwritten if generated again."
+        )
+        if _env_flag("FORCE_RERUN"):
+            logger.info("FORCE_RERUN=1, existing outputs will be overwritten if generated again.")
 
     video_files = _list_scene_videos(scene_dir, args.video, selected_range)
     if len(video_files) == 0:
@@ -335,7 +346,7 @@ def main() -> None:
         )
         expected_outputs = _expected_outputs(scene_output_dir, video_path, video_config)
 
-        if not args.force and _is_video_complete(expected_outputs):
+        if not force_rerun and _is_video_complete(expected_outputs):
             skipped += 1
             logger.info("[%d/%d] Skip completed video: %s", index, len(video_files), video_path.name)
             _append_status(

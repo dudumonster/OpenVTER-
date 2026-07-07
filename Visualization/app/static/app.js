@@ -72,6 +72,7 @@ const state = {
   lastTick: 0,
   frameAccumulator: 0,
   canvasBox: { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, width: 0, height: 0 },
+  sceneSummary: null,
 };
 
 const els = {
@@ -113,6 +114,12 @@ const els = {
   legendList: document.getElementById("legendList"),
   detailContent: document.getElementById("detailContent"),
   scanResult: document.getElementById("scanResult"),
+  sceneOverviewStatus: document.getElementById("sceneOverviewStatus"),
+  sceneOverviewCards: document.getElementById("sceneOverviewCards"),
+  sceneRiskList: document.getElementById("sceneRiskList"),
+  sceneLengthCharts: document.getElementById("sceneLengthCharts"),
+  sceneVideoTableBody: document.getElementById("sceneVideoTableBody"),
+  sceneRefreshButton: document.getElementById("sceneRefreshButton"),
 };
 
 const ctx = els.canvas.getContext("2d");
@@ -160,6 +167,185 @@ async function loadDatasets() {
     renderClassStats();
     renderDimensionAnalysis();
   }
+  const requestedDataset = new URLSearchParams(window.location.search).get("dataset");
+  if (requestedDataset && state.datasets.some((item) => item.dataset_id === requestedDataset && item.is_available !== false)) {
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.delete("dataset");
+    window.history.replaceState({}, "", currentUrl.pathname + currentUrl.search + currentUrl.hash);
+    await loadDataset(requestedDataset, "final");
+  }
+}
+
+async function loadSceneSummary() {
+  if (!els.sceneOverviewStatus) return;
+  els.sceneOverviewStatus.textContent = "正在汇总所有视频...";
+  try {
+    state.sceneSummary = await api("/api/scene-summary");
+    renderSceneOverview();
+  } catch (err) {
+    state.sceneSummary = null;
+    els.sceneOverviewStatus.textContent = `场景汇总失败：${err.message || err}`;
+    if (els.sceneOverviewCards) els.sceneOverviewCards.innerHTML = "";
+    if (els.sceneLengthCharts) els.sceneLengthCharts.innerHTML = "";
+    if (els.sceneVideoTableBody) els.sceneVideoTableBody.innerHTML = "";
+  }
+}
+
+function percentText(value) {
+  return `${((Number(value) || 0) * 100).toFixed(1)}%`;
+}
+
+function sceneRisk(video) {
+  if (!video || video.status !== "converted") {
+    return { level: "high", label: "缺少结果", score: 1000 };
+  }
+  const carRatio = Number(video.car_ge_5_4_ratio) || 0;
+  const vanRatio = Number(video.van_lt_5_4_ratio) || 0;
+  const vanShare = video.vehicle_count ? (Number(video.van_count) || 0) / video.vehicle_count : 0;
+  let score = carRatio * 100 + vanRatio * 100 + Math.max(0, vanShare - 0.25) * 60;
+  if ((video.car_ge_5_4 || 0) >= 5) score += 8;
+  if ((video.van_lt_5_4 || 0) >= 3) score += 8;
+  if (carRatio >= 0.12 || vanRatio >= 0.12 || score >= 18) return { level: "high", label: "重点检查", score };
+  if (carRatio >= 0.04 || vanRatio >= 0.04 || score >= 7) return { level: "medium", label: "建议查看", score };
+  return { level: "low", label: "正常", score };
+}
+
+function sortVideosByRisk(videos) {
+  return [...(videos || [])].sort((a, b) => {
+    const ra = sceneRisk(a);
+    const rb = sceneRisk(b);
+    return rb.score - ra.score || String(a.dataset_id).localeCompare(String(b.dataset_id));
+  });
+}
+
+function renderSceneOverview() {
+  const summary = state.sceneSummary;
+  if (!summary || !els.sceneOverviewCards || !els.sceneLengthCharts || !els.sceneVideoTableBody) return;
+  const rankedVideos = sortVideosByRisk(summary.videos || []);
+  const topRiskVideos = rankedVideos.filter((video) => sceneRisk(video).level !== "low").slice(0, 8);
+  els.sceneOverviewStatus.textContent = `${summary.converted_count}/${summary.video_count} videos converted · ${summary.vehicle_count} vehicles · ${summary.issue_count || 0} issues`;
+  const summaryCards = [
+    ["Videos", `${summary.converted_count}/${summary.video_count}`, summary.issue_count ? `${summary.issue_count} need review` : "all readable"],
+    ["Vehicles", summary.vehicle_count, `${summary.track_count} tracks`],
+    ["car >= 5.4m", `${summary.car_ge_5_4}`, percentText(summary.car_ge_5_4_ratio)],
+    ["van < 5.4m", `${summary.van_lt_5_4}`, percentText(summary.van_lt_5_4_ratio)],
+  ];
+  els.sceneOverviewCards.innerHTML = summaryCards
+    .map(([label, value, note]) => `
+      <div class="scene-metric-card compact">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+        <small>${escapeHtml(note)}</small>
+      </div>
+    `)
+    .join("");
+
+  if (els.sceneRiskList) {
+    els.sceneRiskList.innerHTML = topRiskVideos.length
+      ? topRiskVideos.map((video) => {
+          const risk = sceneRisk(video);
+          return `
+            <button class="scene-risk-item ${risk.level}" data-dataset="${escapeHtml(video.dataset_id)}" ${video.status === "converted" ? "" : "disabled"}>
+              <span class="scene-risk-video">${escapeHtml(video.dataset_id)}</span>
+              <span class="scene-risk-badge">${escapeHtml(risk.label)}</span>
+              <span class="scene-risk-note">car>=5.4m ${video.car_ge_5_4} (${percentText(video.car_ge_5_4_ratio)}) · van<5.4m ${video.van_lt_5_4} (${percentText(video.van_lt_5_4_ratio)})</span>
+            </button>
+          `;
+        }).join("")
+      : `<div class="scene-risk-empty">No high-risk videos by current length rules.</div>`;
+  }
+
+  const summaryVisibleClasses = ["car", "van", "truck", "bus", "freight_car"];
+  const summaryGroups = (summary.class_summaries || []).filter((item) => summaryVisibleClasses.includes(item.class_name));
+  els.sceneLengthCharts.innerHTML = summaryGroups.map(renderSceneLengthChart).join("");
+
+  els.sceneVideoTableBody.innerHTML = rankedVideos
+    .map((video) => {
+      const statusClass = video.status === "converted" ? "ok" : "bad";
+      const risk = sceneRisk(video);
+      return `
+        <tr>
+          <td><button class="scene-video-link" data-dataset="${escapeHtml(video.dataset_id)}" ${video.status === "converted" ? "" : "disabled"}>${escapeHtml(video.dataset_id)}</button></td>
+          <td><span class="scene-status ${statusClass}">${escapeHtml(video.status)}</span></td>
+          <td>${video.vehicle_count}</td>
+          <td>${video.car_count}</td>
+          <td>${video.van_count}</td>
+          <td>${video.car_ge_5_4} <span class="muted">(${percentText(video.car_ge_5_4_ratio)})</span></td>
+          <td>${video.van_lt_5_4} <span class="muted">(${percentText(video.van_lt_5_4_ratio)})</span></td>
+          <td><span class="scene-status ${risk.level}">${escapeHtml(risk.label)}</span></td>
+        </tr>
+      `;
+    })
+    .join("");
+  return;
+  els.sceneOverviewStatus.textContent = `${summary.converted_count}/${summary.video_count} 个视频已转换 · ${summary.vehicle_count} 辆车 · Final Data: ${summary.final_root}`;
+  const cards = [
+    ["视频", `${summary.converted_count}/${summary.video_count}`, summary.issue_count ? `${summary.issue_count} 个需检查` : "全部可读"],
+    ["车辆", summary.vehicle_count, `${summary.track_count} 条轨迹`],
+    ["car", summary.car_count, `>=5.4m ${summary.car_ge_5_4} · ${percentText(summary.car_ge_5_4_ratio)}`],
+    ["van", summary.van_count, `<5.4m ${summary.van_lt_5_4} · ${percentText(summary.van_lt_5_4_ratio)}`],
+  ];
+  els.sceneOverviewCards.innerHTML = cards
+    .map(([label, value, note]) => `
+      <div class="scene-metric-card">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+        <small>${escapeHtml(note)}</small>
+      </div>
+    `)
+    .join("");
+
+  const visibleClasses = ["car", "van", "truck", "bus", "freight_car", "motor"];
+  const groups = (summary.class_summaries || []).filter((item) => visibleClasses.includes(item.class_name));
+  els.sceneLengthCharts.innerHTML = groups.map(renderSceneLengthChart).join("");
+
+  els.sceneVideoTableBody.innerHTML = (summary.videos || [])
+    .map((video) => {
+      const statusClass = video.status === "converted" ? "ok" : "bad";
+      return `
+        <tr>
+          <td>${escapeHtml(video.dataset_id)}</td>
+          <td><span class="scene-status ${statusClass}">${escapeHtml(video.status)}</span></td>
+          <td>${video.vehicle_count}</td>
+          <td>${video.car_count}</td>
+          <td>${video.van_count}</td>
+          <td>${video.car_ge_5_4} <span class="muted">(${percentText(video.car_ge_5_4_ratio)})</span></td>
+          <td>${video.van_lt_5_4} <span class="muted">(${percentText(video.van_lt_5_4_ratio)})</span></td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function renderSceneLengthChart(group) {
+  const histogram = group.histogram || [];
+  const maxCount = Math.max(1, ...histogram.map((item) => item.count || 0));
+  const color = styleFor(group.class_name).color;
+  const bars = histogram
+    .map((item) => {
+      const height = Math.max(2, ((item.count || 0) / maxCount) * 96);
+      return `
+        <div class="scene-bar-slot" title="${escapeHtml(item.label)}: ${item.count}">
+          <div class="scene-bar" style="height:${height}px;background:${color}"></div>
+          <span>${item.count || ""}</span>
+        </div>
+      `;
+    })
+    .join("");
+  const labels = histogram.map((item) => `<span>${escapeHtml(item.label)}</span>`).join("");
+  return `
+    <article class="scene-length-card">
+      <div class="scene-length-card-head">
+        <div>
+          <strong>${escapeHtml(group.class_name)}</strong>
+          <span>${group.count} 辆 · 峰值 ${escapeHtml(group.peak_label || "")}: ${group.peak_count || 0} 辆</span>
+        </div>
+        <div class="scene-length-stat">中位 ${fmt(group.length?.median, 2)} m · P95 ${fmt(group.length?.p95, 2)} m</div>
+      </div>
+      <div class="scene-bars">${bars}</div>
+      <div class="scene-bar-labels">${labels}</div>
+    </article>
+  `;
 }
 
 function renderDatasets() {
@@ -1312,6 +1498,18 @@ els.laneToggle.addEventListener("change", () => {
   draw();
 });
 els.keepUnrelatedToggle.addEventListener("change", draw);
+function handleSceneDatasetClick(event) {
+  const button = event.target.closest("[data-dataset]");
+  if (!button || button.disabled) return;
+  const datasetId = button.dataset.dataset;
+  if (datasetId) loadDataset(datasetId, "final");
+}
+if (els.sceneRiskList) {
+  els.sceneRiskList.addEventListener("click", handleSceneDatasetClick);
+}
+if (els.sceneVideoTableBody) {
+  els.sceneVideoTableBody.addEventListener("click", handleSceneDatasetClick);
+}
 
 els.canvas.addEventListener("mousemove", (event) => {
   const laneHit = findHitLane(event.clientX, event.clientY);

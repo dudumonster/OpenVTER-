@@ -1,0 +1,39 @@
+# 5 类 OBB 训练类别到 OpenVTER 输出类别的映射草案
+
+obb_train_classes:
+  0:
+    name: motor_vehicle
+    zh: 机动车粗类
+    output_rule: physical_length_refinement
+    output_classes:
+      - car
+      - van
+      - truck
+      - bus
+      - freight_car
+  1:
+    name: bicycle
+    zh: 自行车
+    output_class: bicycle
+  2:
+    name: motor
+    zh: 摩托车或电动车
+    output_class: motor
+  3:
+    name: tricycle
+    zh: 三轮车
+    output_class: tricycle
+  4:
+    name: awning_tricycle
+    zh: 带篷三轮车
+    output_class: awning-tricycle
+
+fallback_experiments:
+  merge_tricycle:
+    name: tricycle_all
+    zh: 三轮车合并类
+    merged_from:
+      - tricycle
+      - awning_tricycle
+    reason: 当带篷三轮车和普通三轮车 AP 不稳定时，用作消融或稳健版本。
+

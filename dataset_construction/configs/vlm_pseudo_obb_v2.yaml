@@ -1,0 +1,199 @@
+# VLM 辅助 VisDrone 弱势交通参与者 OBB 伪标注 v2 配置
+
+# ============================================================
+# 路径配置
+# ============================================================
+paths:
+  raw_root: "dataset_construction/data_sources/visdrone/raw"
+  pseudo_root: "dataset_construction/derived/visdrone_pseudo_obb_v2"
+  yolo_root: "dataset_construction/derived/visdrone_yolo_obb_v2"
+
+# ============================================================
+# 数据分割
+# ============================================================
+splits:
+  - train
+  - val
+  # - test-dev  # 无公开标注，暂不使用
+
+# ============================================================
+# 类别映射：VisDrone class_id → OBB 训练 class_id
+# ============================================================
+class_mapping:
+  3:   # bicycle
+    target_id: 1
+    target_name: "bicycle"
+    visdrone_name: "bicycle"
+  10:  # motor
+    target_id: 2
+    target_name: "motor"
+    visdrone_name: "motor"
+  7:   # tricycle
+    target_id: 3
+    target_name: "tricycle"
+    visdrone_name: "tricycle"
+  8:   # awning-tricycle
+    target_id: 4
+    target_name: "awning_tricycle"
+    visdrone_name: "awning-tricycle"
+
+# ============================================================
+# 类别长宽比先验
+# ============================================================
+aspect_priors:
+  bicycle:   [1.2, 8.0]   # 细长：从俯视角度自行车可能很窄
+  motor:     [1.1, 8.0]   # 摩托车同样可能是细长的
+  tricycle:  [1.0, 6.0]   # 三轮车有时较方正
+  awning_tricycle: [1.0, 5.0]  # 带篷三轮车带车厢更方正
+
+# ============================================================
+# 裁剪参数
+# ============================================================
+crop:
+  expand_ratio: 0.20       # 外扩比例（v2 增大到 20%，给 VLM 更多上下文）
+  min_crop_size: 40        # 最小裁剪尺寸（px），过小目标跳过 VLM
+  max_crop_size: 640       # 最大裁剪尺寸（px），超出则等比缩放
+
+# ============================================================
+# VLM / Grounding 后端配置
+# ============================================================
+
+# 主后端（必须指定一个）
+primary_backend: "grounded_sam2"  # grounded_sam2 | groundingdino_sam2 | florence2_sam2 | yoloworld_sam2 | pure_sam2
+
+# GroundingDINO 配置
+groundingdino:
+  enabled: true
+  config_path: "checkpoints/groundingdino/GroundingDINO_SwinT_OGC.py"
+  checkpoint_path: "checkpoints/groundingdino/groundingdino_swint_ogc.pth"
+  box_threshold: 0.25                          # 检测框置信度阈值
+  text_threshold: 0.20                         # 文本匹配阈值
+  device: "mps"
+
+# Florence-2 配置
+florence2:
+  enabled: false
+  model_id: "microsoft/Florence-2-base"        # 或 microsoft/Florence-2-large
+  device: "cuda"
+  task: "<OPEN_VOCABULARY_DETECTION>"          # 或 <CAPTION_TO_PHRASE_GROUNDING>
+
+# SAM2 配置
+sam2:
+  enabled: true
+  config_path: "configs/sam2.1/sam2.1_hiera_b+.yaml"
+  checkpoint_path: "checkpoints/sam2/sam2.1_hiera_base_plus.pt"
+  model_size: "base_plus"                      # tiny | small | base_plus | large
+  device: "mps"
+  multimask_output: true                       # SAM2 输出多个 mask 供选择
+
+# YOLO-World 配置（可选快速初筛）
+yoloworld:
+  enabled: false
+  model_id: "yolov8x-worldv2"                  # ultralytics YOLO-World 模型
+  conf_threshold: 0.15
+  device: "mps"
+
+# Qwen-VL 配置（可选语义审核）
+qwen_vl:
+  enabled: false
+  model_id: "Qwen/Qwen2.5-VL-7B-Instruct"     # 或 72B 版本
+  device: "cuda"
+  use_vllm: false                              # 是否使用 vLLM 加速
+  max_tokens: 256
+
+# Gemini 配置（可选在线 API 语义审核）
+gemini:
+  enabled: false
+  model: "gemini-2.5-pro"                      # 或 gemini-2.5-flash
+  api_key_env: "GEMINI_API_KEY"                # 环境变量名
+  max_tokens: 256
+
+# ============================================================
+# Prompt 模板配置
+# ============================================================
+prompts:
+  # 选择语言
+  language: "en"  # en | zh | both
+
+  # Grounding 模型的文本 prompt（简短、描述性）
+  grounding:
+    bicycle: "bicycle. bicycle with two wheels. bicycle with frame and pedals."
+    motor: "motorcycle. motorbike. scooter. electric bike with motor. two-wheeled motor vehicle."
+    tricycle: "tricycle. three-wheeled vehicle. three-wheeler with open cargo area."
+    awning_tricycle: "awning tricycle. covered three-wheeler. three-wheeled vehicle with canopy. tricycle with roof."
+
+  # VLM 审核 prompt（详细、含区分规则）—— 由 prompt_templates.py 管理
+  prompt_template_module: "dataset_construction.scripts.vlm_prompt_templates"
+
+# ============================================================
+# 质量评分配置
+# ============================================================
+quality:
+  # 综合评分权重
+  geometry_weight: 0.55
+  semantic_weight: 0.45
+
+  # 几何子指标权重
+  geometry:
+    area_weight: 0.35
+    center_weight: 0.25
+    foreground_weight: 0.20
+    aspect_weight: 0.10
+    boundary_weight: 0.10
+
+  # 语义子指标权重
+  semantic:
+    class_confidence_weight: 0.60
+    vlm_box_iou_weight: 0.40
+
+  # 阈值
+  thresholds:
+    auto_accept_final: 0.65       # final_score >= 此值 → auto_accept
+    reject_final: 0.35            # final_score < 此值 → reject
+    geometry_min: 0.50            # geometry_score 下限
+    semantic_min: 0.50            # semantic_score 下限
+    area_ratio_min: 0.15          # 面积比下限（v2 比 v1 更宽松，因为 VLM 可修正）
+    area_ratio_max: 2.00          # 面积比上限
+    center_shift_max: 0.40        # 中心偏移上限
+    foreground_ratio_min: 0.15    # 前景占比下限
+    boundary_clip_max: 0.05       # 边界裁剪上限
+    vlm_class_confidence_min: 0.50
+
+  # 异常检测
+  anomaly:
+    min_mask_pixels: 10           # 最小 mask 像素
+    max_foreground_ratio: 0.95    # 过高的前景比（可能分割了整个 crop）
+    max_area_ratio: 3.0           # 极端面积比
+    min_polygon_area: 4           # 最小 OBB 面积（四点退化检测）
+    multi_component_area_ratio: 0.30  # 次大连通域/主连通域面积比上限
+
+# ============================================================
+# 审核队列配置
+# ============================================================
+review:
+  random_sample_rate: 0.03        # 从 auto_accept 随机抽检比例
+  priority:
+    - class_conflict              # P0: VLM 类别 vs HBB 类别冲突
+    - intra_class_confusion       # P1: tricycle/awning_tricycle, motor/bicycle
+    - occlusion_truncation        # P2: 遮挡或截断
+    - geometry_low_semantic_high  # P3: 几何低分但语义高分
+    - random_sample               # P4: 随机抽检
+
+# ============================================================
+# 输出控制
+# ============================================================
+output:
+  save_mask_crops: true
+  save_previews: true             # 为 review 队列样本保存预览图
+  save_intermediate: true         # 保存中间 JSONL（用于调试和后续分析）
+  copy_mode: "symlink"            # symlink | copy | none
+  progress_every: 50              # 每 N 张图打印进度
+
+# ============================================================
+# 实验模式
+# ============================================================
+experiment:
+  enabled: false                  # 是否为实验模式
+  sample_per_class: 0             # 每类采样数，0 = 全量
+  sample_split: "val"             # 实验所用 split
+  seed: 20260625

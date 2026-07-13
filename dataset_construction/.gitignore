@@ -1,0 +1,10 @@
+data_sources/*/downloads/*
+data_sources/*/raw/*
+data_sources/*/samples/*
+derived/*
+!derived/.gitkeep
+logs/*
+!logs/.gitkeep
+!data_sources/*/downloads/.gitkeep
+!data_sources/*/raw/.gitkeep
+!data_sources/*/samples/.gitkeep

@@ -20,6 +20,11 @@ streamlit>=1.20,<2.0
 # Example:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
+# Optional pseudo-OBB generation accelerators
+# Install one of these on the GPU server when using SAM/SAM2 box-prompt masks:
+#   pip install git+https://github.com/facebookresearch/segment-anything.git
+#   pip install git+https://github.com/facebookresearch/sam2.git
+
 # OpenMMLab stack
 # mmcv / mmdet / mmrotate must match your torch + CUDA environment.
 # Install them manually after torch is ready to avoid binary mismatch issues.

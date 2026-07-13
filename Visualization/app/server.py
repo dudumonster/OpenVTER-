@@ -155,7 +155,31 @@ def _standard_dataset_summary_light(dataset_dir: Path):
 
 
 SCENE_VEHICLE_CLASSES = ["car", "van", "truck", "bus", "freight_car", "motor", "tricycle", "bicycle", "awning-tricycle"]
-SCENE_LENGTH_BINS = [0.0, 3.5, 4.0, 4.5, 5.0, 5.4, 6.0, 6.8, 8.0, 9.5, 12.0, math.inf]
+SCENE_DIMENSION_CLASSES = ["car", "van", "truck", "bus", "freight_car", "motor", "tricycle", "bicycle", "awning-tricycle"]
+SCENE_DEFAULT_LENGTH_BINS = [0.0, 2.0, 3.5, 5.0, 6.8, 8.0, 9.5, 12.0, math.inf]
+SCENE_LENGTH_BINS_BY_CLASS = {
+    "car": [0.0, 3.5, 3.8, 4.1, 4.4, 4.7, 5.0, 5.2, 5.4, 5.8, math.inf],
+    "van": [0.0, 4.5, 5.0, 5.4, 5.8, 6.2, 6.8, 7.5, 8.5, math.inf],
+    "truck": [0.0, 5.0, 6.0, 6.8, 7.5, 8.0, 8.5, 9.0, 9.5, 10.5, 12.0, math.inf],
+    "bus": [0.0, 7.0, 8.0, 9.0, 9.5, 10.0, 10.5, 11.0, 12.0, 14.0, math.inf],
+    "freight_car": [0.0, 5.0, 6.0, 6.8, 7.5, 8.0, 8.5, 9.0, 9.5, 10.5, 12.0, math.inf],
+    "motor": [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, math.inf],
+    "tricycle": [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, math.inf],
+    "bicycle": [0.0, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.4, math.inf],
+    "awning-tricycle": [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, math.inf],
+}
+SCENE_DEFAULT_WIDTH_BINS = [0.0, 0.5, 1.0, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0, math.inf]
+SCENE_WIDTH_BINS_BY_CLASS = {
+    "car": [0.0, 1.4, 1.6, 1.7, 1.8, 1.9, 2.0, 2.2, 2.5, math.inf],
+    "van": [0.0, 1.6, 1.8, 2.0, 2.2, 2.4, 2.6, 3.0, math.inf],
+    "truck": [0.0, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.6, math.inf],
+    "bus": [0.0, 2.0, 2.2, 2.4, 2.6, 2.8, 3.2, 3.6, math.inf],
+    "freight_car": [0.0, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.6, math.inf],
+    "motor": [0.0, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3, 1.6, math.inf],
+    "tricycle": [0.0, 0.5, 0.8, 1.0, 1.2, 1.5, 1.8, 2.2, math.inf],
+    "bicycle": [0.0, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3, math.inf],
+    "awning-tricycle": [0.0, 0.6, 0.8, 1.0, 1.2, 1.5, 1.8, 2.2, math.inf],
+}
 
 
 def _scene_bin_label(lo: float, hi: float) -> str:
@@ -164,18 +188,74 @@ def _scene_bin_label(lo: float, hi: float) -> str:
     return f"{lo:g}-{hi:g}"
 
 
-def _scene_empty_histogram():
+def _scene_bins_for(class_name: str, metric: str):
+    if metric == "width":
+        return SCENE_WIDTH_BINS_BY_CLASS.get(class_name, SCENE_DEFAULT_WIDTH_BINS)
+    return SCENE_LENGTH_BINS_BY_CLASS.get(class_name, SCENE_DEFAULT_LENGTH_BINS)
+
+
+def _scene_empty_histogram(bins):
     return [
         {"label": _scene_bin_label(lo, hi), "min": lo, "max": None if math.isinf(hi) else hi, "count": 0}
-        for lo, hi in zip(SCENE_LENGTH_BINS[:-1], SCENE_LENGTH_BINS[1:])
+        for lo, hi in zip(bins[:-1], bins[1:])
     ]
 
 
-def _scene_add_length(histogram, length: float) -> None:
-    for item, lo, hi in zip(histogram, SCENE_LENGTH_BINS[:-1], SCENE_LENGTH_BINS[1:]):
-        if lo <= length < hi:
+def _scene_add_value(histogram, bins, value: float) -> None:
+    for item, lo, hi in zip(histogram, bins[:-1], bins[1:]):
+        if lo <= value < hi:
             item["count"] += 1
             return
+
+
+def _scene_percentile(values, pct: float):
+    values = sorted(v for v in values if v is not None and math.isfinite(v))
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    rank = (len(values) - 1) * pct / 100.0
+    lo = int(math.floor(rank))
+    hi = int(math.ceil(rank))
+    if lo == hi:
+        return values[lo]
+    return values[lo] * (hi - rank) + values[hi] * (rank - lo)
+
+
+def _nice_step(raw_step: float) -> float:
+    if raw_step <= 0:
+        return 0.5
+    base = 10 ** math.floor(math.log10(raw_step))
+    for mult in (1.0, 2.0, 2.5, 5.0, 10.0):
+        step = base * mult
+        if raw_step <= step:
+            return step
+    return base * 10.0
+
+
+def _scene_dynamic_bins(values, metric: str):
+    finite = sorted(v for v in values if v is not None and math.isfinite(v) and v > 0)
+    if not finite:
+        return SCENE_DEFAULT_WIDTH_BINS if metric == "width" else SCENE_DEFAULT_LENGTH_BINS
+    lower = 0.0
+    upper = _scene_percentile(finite, 98) or finite[-1]
+    upper = max(upper, finite[-1] if len(finite) <= 3 else upper)
+    if metric == "width":
+        upper = min(max(upper * 1.12, 1.0), 4.0)
+        preferred_step = 0.2
+    else:
+        upper = min(max(upper * 1.12, 2.0), 18.0)
+        preferred_step = 0.5
+    step = max(preferred_step, _nice_step(upper / 8.0))
+    upper = math.ceil(upper / step) * step
+    bins = [lower]
+    cur = lower + step
+    while cur < upper - 1e-9:
+        bins.append(round(cur, 4))
+        cur += step
+    bins.append(round(upper, 4))
+    bins.append(math.inf)
+    return bins
 
 
 def _scene_length_stats(values):
@@ -206,26 +286,39 @@ def _scene_length_stats(values):
 def _scene_class_summary(class_name: str, rows):
     lengths = []
     widths = []
-    histogram = _scene_empty_histogram()
     for row in rows:
         length = _float(row.get("corrected_height"), _float(row.get("length")))
         width = _float(row.get("corrected_width"), _float(row.get("width")))
         if length is not None and length > 0:
             lengths.append(length)
-            _scene_add_length(histogram, length)
         if width is not None and width > 0:
             widths.append(width)
+    length_bins = _scene_bins_for(class_name, "length") if class_name in SCENE_LENGTH_BINS_BY_CLASS else _scene_dynamic_bins(lengths, "length")
+    width_bins = _scene_bins_for(class_name, "width") if class_name in SCENE_WIDTH_BINS_BY_CLASS else _scene_dynamic_bins(widths, "width")
+    length_histogram = _scene_empty_histogram(length_bins)
+    width_histogram = _scene_empty_histogram(width_bins)
+    for length in lengths:
+        _scene_add_value(length_histogram, length_bins, length)
+    for width in widths:
+        _scene_add_value(width_histogram, width_bins, width)
     stats = _scene_length_stats(lengths)
     width_stats = _scene_length_stats(widths)
-    peak = max(histogram, key=lambda item: item["count"], default={"label": "", "count": 0})
+    length_peak = max(length_histogram, key=lambda item: item["count"], default={"label": "", "count": 0})
+    width_peak = max(width_histogram, key=lambda item: item["count"], default={"label": "", "count": 0})
     return {
         "class_name": class_name,
         "count": len(rows),
         "length": stats,
         "width": width_stats,
-        "histogram": histogram,
-        "peak_label": peak["label"],
-        "peak_count": peak["count"],
+        "histogram": length_histogram,
+        "length_histogram": length_histogram,
+        "width_histogram": width_histogram,
+        "peak_label": length_peak["label"],
+        "peak_count": length_peak["count"],
+        "length_peak_label": length_peak["label"],
+        "length_peak_count": length_peak["count"],
+        "width_peak_label": width_peak["label"],
+        "width_peak_count": width_peak["count"],
     }
 
 
@@ -310,11 +403,9 @@ def _scene_summary() -> dict:
 
     class_summaries = [
         _scene_class_summary(class_name, by_class[class_name])
-        for class_name in SCENE_VEHICLE_CLASSES
+        for class_name in SCENE_DIMENSION_CLASSES
         if by_class.get(class_name)
     ]
-    other_classes = sorted(set(by_class) - set(SCENE_VEHICLE_CLASSES))
-    class_summaries.extend(_scene_class_summary(class_name, by_class[class_name]) for class_name in other_classes)
 
     vehicle_total = sum(row["vehicle_count"] for row in videos)
     car_total = total_class_counts.get("car", 0)
@@ -334,7 +425,7 @@ def _scene_summary() -> dict:
         "car_ge_5_4_ratio": car_long_count / car_total if car_total else 0.0,
         "van_lt_5_4": van_short_count,
         "van_lt_5_4_ratio": van_short_count / van_total if van_total else 0.0,
-        "length_bins": [_scene_bin_label(lo, hi) for lo, hi in zip(SCENE_LENGTH_BINS[:-1], SCENE_LENGTH_BINS[1:])],
+        "length_bins": [_scene_bin_label(lo, hi) for lo, hi in zip(SCENE_DEFAULT_LENGTH_BINS[:-1], SCENE_DEFAULT_LENGTH_BINS[1:])],
         "class_summaries": class_summaries,
         "videos": videos,
     }

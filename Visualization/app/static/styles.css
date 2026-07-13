@@ -242,6 +242,18 @@ select {
   text-align: center;
 }
 
+.scene-empty-chart {
+  display: grid;
+  min-height: 136px;
+  place-items: center;
+  padding: 16px;
+  border: 1px dashed #d5dce6;
+  border-radius: 12px;
+  color: #64748b;
+  font-size: 13px;
+  text-align: center;
+}
+
 .scene-video-details {
   margin-top: 14px;
   border-top: 1px solid #e6eaf0;

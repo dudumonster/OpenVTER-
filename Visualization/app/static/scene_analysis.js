@@ -5,14 +5,20 @@ const CATEGORY_STYLES = {
   bus: { color: "#7c3aed" },
   freight_car: { color: "#92400e" },
   motor: { color: "#f97316" },
+  tricycle: { color: "#65a30d" },
+  bicycle: { color: "#16a34a" },
+  "awning-tricycle": { color: "#84cc16" },
 };
+
+const SCENE_CLASS_ORDER = ["car", "van", "truck", "bus", "freight_car", "motor", "tricycle", "bicycle", "awning-tricycle"];
 
 const els = {
   status: document.getElementById("scenePageStatus"),
   refresh: document.getElementById("sceneRefreshButton"),
   cards: document.getElementById("sceneOverviewCards"),
   risks: document.getElementById("sceneRiskList"),
-  charts: document.getElementById("sceneLengthCharts"),
+  lengthCharts: document.getElementById("sceneLengthCharts"),
+  widthCharts: document.getElementById("sceneWidthCharts"),
   table: document.getElementById("sceneVideoTableBody"),
 };
 
@@ -89,19 +95,32 @@ function renderRisks(summary) {
           <a class="scene-risk-item ${risk.level}" href="/?dataset=${encodeURIComponent(video.dataset_id)}">
             <span class="scene-risk-video">${escapeHtml(video.dataset_id)}</span>
             <span class="scene-risk-badge">${escapeHtml(risk.label)}</span>
-            <span class="scene-risk-note">car>=5.4m ${video.car_ge_5_4} (${percentText(video.car_ge_5_4_ratio)}) · van<5.4m ${video.van_lt_5_4} (${percentText(video.van_lt_5_4_ratio)})</span>
+            <span class="scene-risk-note">car>=5.4m ${video.car_ge_5_4} (${percentText(video.car_ge_5_4_ratio)}) / van<5.4m ${video.van_lt_5_4} (${percentText(video.van_lt_5_4_ratio)})</span>
           </a>
         `;
       }).join("")
     : '<div class="scene-risk-empty">当前规则下没有高风险视频。</div>';
 }
 
-function renderLengthChart(group) {
-  const histogram = group.histogram || [];
+function renderMetricChart(group, metric) {
+  const histogram = group[`${metric}_histogram`] || (metric === "length" ? group.histogram : []) || [];
+  if (!histogram.length) {
+    return `
+      <article class="scene-length-card">
+        <div class="scene-length-card-head">
+          <div>
+            <strong>${escapeHtml(group.class_name)}</strong>
+            <span>${group.count} 辆</span>
+          </div>
+        </div>
+        <div class="scene-empty-chart">暂无${metric === "width" ? "宽度" : "长度"}分布数据，请确认 server.py 已同步并重启。</div>
+      </article>
+    `;
+  }
   const maxCount = Math.max(1, ...histogram.map((item) => item.count || 0));
   const color = CATEGORY_STYLES[group.class_name]?.color || "#64748b";
   const bars = histogram.map((item) => {
-    const height = Math.max(2, ((item.count || 0) / maxCount) * 120);
+    const height = Math.max(2, ((item.count || 0) / maxCount) * 128);
     return `
       <div class="scene-bar-slot" title="${escapeHtml(item.label)}: ${item.count}">
         <div class="scene-bar" style="height:${height}px;background:${color}"></div>
@@ -110,25 +129,42 @@ function renderLengthChart(group) {
     `;
   }).join("");
   const labels = histogram.map((item) => `<span>${escapeHtml(item.label)}</span>`).join("");
+  const stats = group[metric] || {};
+  const peakLabel = group[`${metric}_peak_label`] || group.peak_label || "";
+  const peakCount = group[`${metric}_peak_count`] || group.peak_count || 0;
+  const metricLabel = metric === "width" ? "宽度" : "长度";
+  const unit = metric === "width" ? "宽" : "长";
   return `
     <article class="scene-length-card">
       <div class="scene-length-card-head">
         <div>
           <strong>${escapeHtml(group.class_name)}</strong>
-          <span>${group.count} 辆 · 峰值 ${escapeHtml(group.peak_label || "")}: ${group.peak_count || 0} 辆</span>
+          <span>${group.count} 辆 / 峰值${unit} ${escapeHtml(peakLabel)}: ${peakCount} 辆</span>
         </div>
-        <div class="scene-length-stat">中位 ${fmt(group.length?.median, 2)} m · P95 ${fmt(group.length?.p95, 2)} m</div>
+        <div class="scene-length-stat">${metricLabel}中位 ${fmt(stats.median, 2)} m / P95 ${fmt(stats.p95, 2)} m</div>
       </div>
-      <div class="scene-bars">${bars}</div>
-      <div class="scene-bar-labels">${labels}</div>
+      <div class="scene-bars" style="grid-template-columns:repeat(${Math.max(1, histogram.length)}, minmax(11px, 1fr))">${bars}</div>
+      <div class="scene-bar-labels" style="grid-template-columns:repeat(${Math.max(1, histogram.length)}, minmax(11px, 1fr))">${labels}</div>
     </article>
   `;
 }
 
+function sceneGroups(summary) {
+  return [...(summary.class_summaries || [])]
+    .filter((item) => item && item.count > 0)
+    .sort((a, b) => {
+      const ai = SCENE_CLASS_ORDER.indexOf(a.class_name);
+      const bi = SCENE_CLASS_ORDER.indexOf(b.class_name);
+      const ao = ai === -1 ? 999 : ai;
+      const bo = bi === -1 ? 999 : bi;
+      return ao - bo || (b.count || 0) - (a.count || 0) || String(a.class_name).localeCompare(String(b.class_name));
+    });
+}
+
 function renderCharts(summary) {
-  const classes = ["car", "van", "truck", "bus", "freight_car", "motor"];
-  const groups = (summary.class_summaries || []).filter((item) => classes.includes(item.class_name));
-  els.charts.innerHTML = groups.map(renderLengthChart).join("");
+  const groups = sceneGroups(summary);
+  els.lengthCharts.innerHTML = groups.map((group) => renderMetricChart(group, "length")).join("");
+  els.widthCharts.innerHTML = groups.map((group) => renderMetricChart(group, "width")).join("");
 }
 
 function renderTable(summary) {
@@ -157,7 +193,7 @@ async function loadSceneSummary() {
   els.status.textContent = "正在汇总所有视频...";
   try {
     const summary = await api("/api/scene-summary");
-    els.status.textContent = `${summary.converted_count}/${summary.video_count} 个视频已转换 · ${summary.vehicle_count} 辆车 · Final Data: ${summary.final_root}`;
+    els.status.textContent = `${summary.converted_count}/${summary.video_count} 个视频已转换 / ${summary.vehicle_count} 辆车 / Final Data: ${summary.final_root}`;
     renderCards(summary);
     renderRisks(summary);
     renderCharts(summary);
@@ -166,7 +202,8 @@ async function loadSceneSummary() {
     els.status.textContent = `场景汇总失败：${err.message || err}`;
     els.cards.innerHTML = "";
     els.risks.innerHTML = "";
-    els.charts.innerHTML = "";
+    els.lengthCharts.innerHTML = "";
+    els.widthCharts.innerHTML = "";
     els.table.innerHTML = "";
   }
 }

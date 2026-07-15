@@ -713,3 +713,54 @@ manifest.json 新增字段：
 
 - Python 端远端新增测试尚未实际执行，原因是当前可用 Python 环境未安装 `pytest`。
 - 本地仍保留大量被忽略的数据集文件和派生结果；它们不会随本轮提交上传到 GitHub。
+
+### 2026-07-14 容器内双链路轨迹拖尾视频
+
+**任务目标与修改原因**
+
+- 为 `ban_xian_shan_001` 增加两条视频后处理链路：处理后 `moving_filtered` OBB 回映原视频，以及原始 `tracking_output_stab_det_*` 视频拖尾。
+- 每条链路支持 10 秒有限拖尾和永久拖尾；原视频版不显示 ID，tracking 版不新增 ID。
+- 所有服务器命令使用容器内绝对路径，并把输出写入 visualization 持久化目录。
+
+**核心实现**
+
+- 扩展 `scripts/overlay_processed_obb_on_video.py`，新增 `--video-source`、`--trail-mode`、拖尾时长/宽度、类别图例、OBB 开关和持久化 artifact root。
+- 有限拖尾按帧龄淡出，目标离场后继续保留至 10 秒生命周期结束；永久拖尾使用稳像坐标持久画布增量累计。
+- 原视频模式将稳像拖尾层和 OBB 使用当前帧逆稳像矩阵映射回原图；tracking 模式使用 PKL 的像素 OBB 中心和 `output_frame -> source_frame` 映射。
+- 新增 `scripts/run_ban_xian_shan_001_trails.sh`，提供容器路径、依赖、可写性、8 GiB 空间预检，并分别执行 preview/full 四种输出。
+- 根据原始 PKL 统计，30 秒最密集预览窗口为 2079-2977 帧，共 899 帧，平均约 53.13 个目标/帧。
+
+**输出数据与参数**
+
+- 输入视频：3840x2160，29.97 FPS，9024 帧。
+- 有限拖尾：10 秒，按结果帧率换算为 300 帧；线宽 4；最大连接缺口 30 帧。
+- tracking 原始 PKL：9024 个完整帧映射，1146 条 raw track，428042 行观测。
+- moving_filtered：181 条处理后 track，111638 行轨迹。
+- 输出报告包含输入路径、帧映射数、轨迹/类别统计、写入帧数、帧率、分辨率和缺失映射数。
+
+**已运行验证**
+
+- `bash -n scripts/run_ban_xian_shan_001_trails.sh`：通过。
+- `python -m py_compile scripts/overlay_processed_obb_on_video.py`：通过。
+- `python -m pytest tests/test_trajectory_video_trails.py -q`：5 passed。
+- `python -m pytest tests/test_trajectory_video_trails.py tests/test_calibration_and_dimension_filter.py -q`：最终 13 passed；仅有本机 SciPy/NumPy 版本提示，不影响测试结果。
+- tracking finite 真实 4K 冒烟：12/12 帧，29.97 FPS，3840x2160，缺失映射 0。
+- tracking permanent 真实 4K 冒烟：3/3 帧，29.97 FPS，3840x2160，缺失映射 0。
+- moving_filtered 重建 OBB/finite 真实 4K 冒烟：5/5 帧，14 个框/帧，缺失映射 0；本地使用稳像视频作底图，仅验证处理链路，真正原视频逆稳像视觉效果留到服务器容器预览确认。
+- `git diff --check`：通过，仅有 Windows 工作区 LF/CRLF 提示。
+
+**风险与待确认**
+
+- 本地没有服务器原始 MP4，原视频逆稳像对齐必须先在容器执行 preview 并人工检查，确认后再执行 full。
+- 4 个完整 4K 视频预计占用约 4-6 GiB；运行脚本按至少 8 GiB 可用空间预检。
+- tracking 输入视频中的 ID 已在推理阶段烧入，后处理只保证不新增 ID，无法直接移除已有文字。
+
+### 2026-07-14 轨迹预览 MP4 完整性与 17 秒拖尾修正
+
+- 有限拖尾时长由 10 秒调整为 17 秒；29.97 FPS 下约为 509 帧。
+- 输出视频先写入同目录隐藏文件 `.<输出名>.part.mp4`，关闭编码器并用 OpenCV 校验可读性和帧数后，再原子替换最终 `.mp4`。
+- 渲染期间每 100 帧输出一次进度；如果渲染中断或校验失败，只保留 `.part.mp4`，不会让未封装完成的文件冒充最终视频。
+- 17 秒有限拖尾输出名统一使用 `trail_17s`；永久拖尾输出名保持不变。
+- 无法打开的旧永久预览最可能是在旧版直接写最终文件时被中断，导致 MP4 索引未完成；旧损坏文件需要重新渲染，无法通过改参数原地修复。
+- `python -m pytest tests/test_trajectory_video_trails.py tests/test_calibration_and_dimension_filter.py -q`：15 passed；仅有本机 SciPy/NumPy 版本提示。
+- 真实 4K、永久拖尾、17 秒默认参数的 3 帧原子发布冒烟测试通过：3840×2160、29.97 FPS、3/3 帧可解码；成功后 `.part.mp4` 不残留，报告中的有限拖尾换算值为 509 帧。
